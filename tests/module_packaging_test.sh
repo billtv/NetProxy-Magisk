@@ -10,9 +10,9 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BUILD_ACTION="$ROOT/.github/actions/build-module/action.yml"
 MANAGER_ACTION="$ROOT/.github/actions/build-manager/action.yml"
 ANDROID_BUILD="$ROOT/src/android/app/build.gradle.kts"
-RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
-CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
+BUILD_WORKFLOW="$ROOT/.github/workflows/build-release.yml"
 SYNC_WORKFLOW="$ROOT/.github/workflows/sync-upstream.yml"
+WORKFLOW_DIR="$ROOT/.github/workflows"
 
 assert_contains() {
   grep -Fq "$2" "$1" || {
@@ -40,19 +40,28 @@ assert_contains "$MANAGER_ACTION" 'NETPROXY_RELEASE_STORE_FILE'
 assert_contains "$ANDROID_BUILD" 'providers.environmentVariable("NETPROXY_RELEASE_STORE_FILE")'
 assert_contains "$ANDROID_BUILD" 'signingConfig = signingConfigs.getByName("ciRelease")'
 
-assert_contains "$RELEASE_WORKFLOW" 'STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}'
-assert_contains "$RELEASE_WORKFLOW" 'APK_NAME: ${{ steps.manager.outputs.apk_name }}'
-assert_contains "$RELEASE_WORKFLOW" '[标准包]'
-assert_contains "$RELEASE_WORKFLOW" '[管理器 APK]'
-assert_not_contains "$RELEASE_WORKFLOW" 'update.json|manager_name|with-manager'
-assert_not_contains "$RELEASE_WORKFLOW" 'full_name|lite_name|FULL_NAME|LITE_NAME'
+assert_contains "$BUILD_WORKFLOW" 'STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}'
+assert_contains "$BUILD_WORKFLOW" 'APK_NAME: ${{ steps.manager.outputs.apk_name }}'
+assert_contains "$BUILD_WORKFLOW" 'gh release upload'
+assert_contains "$BUILD_WORKFLOW" 'cleanup_assets'
+assert_not_contains "$BUILD_WORKFLOW" 'update.json|manager_name|with-manager'
+assert_not_contains "$BUILD_WORKFLOW" 'full_name|lite_name|FULL_NAME|LITE_NAME'
 
-assert_contains "$CI_WORKFLOW" '${{ steps.pack.outputs.standard_name }}'
-assert_contains "$CI_WORKFLOW" '${{ steps.manager.outputs.apk_name }}'
-assert_not_contains "$CI_WORKFLOW" 'full_name|lite_name'
+workflow_count=$(find "$WORKFLOW_DIR" -maxdepth 1 -type f \
+  \( -name '*.yml' -o -name '*.yaml' \) | wc -l | tr -d ' ')
+[ "$workflow_count" -eq 2 ] || {
+  printf '工作流数量不是 2，而是 %s\n' "$workflow_count" >&2
+  exit 1
+}
+[ -f "$BUILD_WORKFLOW" ] && [ -f "$SYNC_WORKFLOW" ] || {
+  printf '%s\n' '缺少保留的构建或同步工作流' >&2
+  exit 1
+}
 
 assert_contains "$SYNC_WORKFLOW" "cron: '*/15 * * * *'"
 assert_contains "$SYNC_WORKFLOW" 'UPSTREAM_REPO: Fanju6/NetProxy-Magisk'
-assert_contains "$SYNC_WORKFLOW" 'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main'
+assert_contains "$SYNC_WORKFLOW" 'git checkout --ours -- "$path"'
+assert_contains "$SYNC_WORKFLOW" 'git checkout --theirs -- "$path"'
+assert_contains "$SYNC_WORKFLOW" 'gh workflow run build-release.yml --repo "$GITHUB_REPOSITORY" --ref main'
 
 printf '%s\n' 'module packaging test passed'

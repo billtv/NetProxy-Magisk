@@ -59,8 +59,66 @@ jobs:
           if git merge-base --is-ancestor "$local_sha" "$upstream_sha"; then
             git merge --ff-only upstream/main
           else
-            # fork 需要保留本仓库的工作流定制；有冲突时停止并保留现场，不强制覆盖 main。
-            git merge --no-edit upstream/main
+            # 冲突策略：源码和资源以 upstream/main 为准；构建、发布、同步工作流
+            # 以及它们依赖的本地 action 以本仓库为准。这样不会 force-push 改写历史，
+            # 但会强制保留本仓库的构建流程。
+            if git merge --no-commit --no-edit upstream/main; then
+              :
+            else
+              conflicts="$(git diff --name-only --diff-filter=U)"
+              if [ -z "$conflicts" ]; then
+                echo '合并失败但没有可自动解决的冲突，停止同步。' >&2
+                exit 1
+              fi
+              resolve_conflict() {
+                local side="$1"
+                local path="$2"
+                if git cat-file -e "$side:$path" 2>/dev/null; then
+                  if [ "$side" = "$local_sha" ]; then
+                    git checkout --ours -- "$path"
+                  else
+                    git checkout --theirs -- "$path"
+                  fi
+                else
+                  git rm -f -- "$path" 2>/dev/null || git add -u -- "$path"
+                fi
+              }
+              printf '%s\n' "$conflicts" | while IFS= read -r path; do
+                case "$path" in
+                  .github/workflows/*|.github/actions/*)
+                    resolve_conflict "$local_sha" "$path"
+                    ;;
+                  *)
+                    resolve_conflict upstream/main "$path"
+                    ;;
+                esac
+              done
+              git add -A
+              git commit \
+                -m 'ci(sync): 保留本地构建流程并强制同步上游' \
+                -m '上游代码冲突时采用上游版本，保留本仓库的自动同步、构建与发布工作流。'
+            fi
+          fi
+
+          # 即使上游改动没有形成 Git 冲突，也恢复本地 CI 文件，确保构建流程不会被上游覆盖。
+          git checkout "$local_sha" -- \
+            .github/workflows/build-release.yml \
+            .github/workflows/sync-upstream.yml \
+            .github/actions
+
+          # 无论上游是否新增了工作流，最终只保留本仓库定义的两条流程。
+          while IFS= read -r workflow; do
+            case "$(basename "$workflow")" in
+              build-release.yml|sync-upstream.yml) ;;
+              *) git rm -f -- "$workflow" ;;
+            esac
+          done < <(
+            find .github/workflows -maxdepth 1 -type f \
+              \( -name '*.yml' -o -name '*.yaml' \) -print
+          )
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'ci: 只保留同步与双资产构建流程'
           fi
 
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
@@ -71,4 +129,4 @@ jobs:
         if: steps.sync.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main
+        run: gh workflow run build-release.yml --repo "$GITHUB_REPOSITORY" --ref main

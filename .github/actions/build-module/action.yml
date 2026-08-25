@@ -1,7 +1,7 @@
 name: 构建并打包模块
 description: 构建 WebUI、写入 versionCode，并打出标准模块包
 
-# 被 ci.yml 与 release.yml 复用的共享打包逻辑（调用前需已 checkout，且 fetch-depth: 0 以便统计提交数）
+# 被 build-release.yml 复用的共享打包逻辑（调用前需已 checkout，且 fetch-depth: 0 以便统计提交数）
 outputs:
   version:
     description: 模块版本号（取自 module.prop 的 version=）

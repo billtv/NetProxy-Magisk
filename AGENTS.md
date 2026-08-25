@@ -354,7 +354,7 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 - 构建动作先测试并交叉编译 `netproxy-native`，再构建 WebUI，最后打包模块。
 - 标准模块包不包含 `NetProxy.apk`；管理器 APK 由独立构建步骤签名并作为 Release 资产发布，代理能力与模块包保持分离。
 - CI 使用临时自签名证书构建管理器 APK，不覆盖仓库内的 `src/module/NetProxy.apk`；Google Play 仍是推荐更新渠道。
-- `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；高风险或大版本更新进入报告，不自动静默升级。
+- 上游代码、资源和依赖通过上游同步或普通提交进入统一构建流程；不再启用额外的定时资源更新发布流程。
 
 ## 安全边界
 
