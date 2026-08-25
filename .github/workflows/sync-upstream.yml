@@ -1,0 +1,74 @@
+name: 同步上游并触发构建
+
+# GitHub 不会因为上游仓库的 push 直接触发 fork 的工作流，因此使用轮询检查。
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 同步 Fanju6/NetProxy-Magisk
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取 fork 主分支
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 检查并合并上游提交
+        id: sync
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: Fanju6/NetProxy-Magisk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream main
+
+          local_sha="$(git rev-parse HEAD)"
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          echo "当前 main: $local_sha"
+          echo "上游 main: $upstream_sha"
+
+          if [ "$local_sha" = "$upstream_sha" ]; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$upstream_sha" "$local_sha"; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo '当前 fork 已包含上游提交。'
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$local_sha" "$upstream_sha"; then
+            git merge --ff-only upstream/main
+          else
+            # fork 需要保留本仓库的工作流定制；有冲突时停止并保留现场，不强制覆盖 main。
+            git merge --no-edit upstream/main
+          fi
+
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "synced_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 显式触发构建与发布
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main

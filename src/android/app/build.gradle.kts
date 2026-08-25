@@ -19,6 +19,18 @@ fun gitCommitCount(): Int {
     }.getOrDefault(1)
 }
 
+// CI 使用临时自签名证书构建可安装的 Release APK；本地未提供这些变量时保持未签名构建。
+val releaseStoreFile = providers.environmentVariable("NETPROXY_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("NETPROXY_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("NETPROXY_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("NETPROXY_RELEASE_KEY_PASSWORD").orNull
+val hasCiSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.fanjv.netproxy"
     compileSdk {
@@ -36,9 +48,23 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasCiSigning) {
+            create("ciRelease") {
+                storeFile = file(checkNotNull(releaseStoreFile))
+                storePassword = checkNotNull(releaseStorePassword)
+                keyAlias = checkNotNull(releaseKeyAlias)
+                keyPassword = checkNotNull(releaseKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
             optimization.enable = true
+            if (hasCiSigning) {
+                signingConfig = signingConfigs.getByName("ciRelease")
+            }
         }
     }
     buildFeatures {

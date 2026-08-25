@@ -24,35 +24,58 @@ jobs:
         id: pack
         uses: ./.github/actions/build-module
 
-      - name: 生成 update.json（模块自更新清单，随 Release 上传）
+      - name: 构建并签名管理器 APK
+        id: manager
+        uses: ./.github/actions/build-manager
+
+      - name: 清理 Release 中多余的旧资产
         env:
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-          COMMIT_COUNT: ${{ steps.pack.outputs.commit_count }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
           STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}
+          APK_NAME: ${{ steps.manager.outputs.apk_name }}
         run: |
-          # 以仓库根的 update.json 为模板（保留 changelog 等静态字段），仅回填动态字段
-          # 模板与产物同名，先写临时文件再覆盖，避免重定向截断输入
-          tmp="$(mktemp)"
-          jq \
-            --arg version "Module ${TAG}" \
-            --argjson versionCode "${COMMIT_COUNT}" \
-            --arg zipUrl "https://github.com/${REPO}/releases/download/${TAG}/${STANDARD_NAME}" \
-            '.version = $version | .versionCode = $versionCode | .zipUrl = $zipUrl' \
-            update.json > "$tmp"
-          mv "$tmp" update.json
-          cat update.json
+          set -euo pipefail
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id' 2>/dev/null || true)"
+          [ -n "$release_id" ] || exit 0
+
+          while IFS="$(printf '\t')" read -r asset_id asset_name; do
+            case "$asset_name" in
+              "$STANDARD_NAME"|"$APK_NAME") ;;
+              *) gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" ;;
+            esac
+          done < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              --jq '.[] | [.id, .name] | @tsv'
+          )
 
       - name: 发布 GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          body_path: docs/changelog.md
-          files: |
-            ${{ steps.pack.outputs.standard_name }}
-            ${{ steps.pack.outputs.manager_name }}
-            update.json
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}
+          APK_NAME: ${{ steps.manager.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "NetProxy $RELEASE_TAG" \
+              --notes-file docs/changelog.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "NetProxy $RELEASE_TAG" \
+              --notes-file docs/changelog.md
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "$STANDARD_NAME" \
+            "$APK_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
       - name: 发布通知到 Telegram
         uses: cbrgm/telegram-github-action@v1
@@ -70,7 +93,7 @@ jobs:
 
             **直接下载:**
             [标准包](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.pack.outputs.standard_name }})
-            [含管理器包](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.pack.outputs.manager_name }})
+            [管理器 APK](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.manager.outputs.apk_name }})
 
       - name: 触发同步到 KernelSU 仓库
         if: github.ref_type == 'tag'

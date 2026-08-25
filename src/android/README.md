@@ -5,10 +5,10 @@
 ## 获取应用
 
 - 推荐通过 [Google Play](https://play.google.com/store/apps/details?id=com.fanjv.netproxy) 安装和更新。
-- NetProxy 完整模块包内置带广告的管理器 APK，供无法使用 Google Play 的设备安装。
-- Lite 模块包不包含管理器 APK。
+- 仓库 Release 另提供独立的自签名管理器 APK，供无法使用 Google Play 的设备手动安装。
+- 模块 ZIP 不包含管理器 APK。
 
-模块内置 APK 是独立维护的发行产物，不由仓库 CI 自动编译，也不会在本地构建后自动覆盖 `src/module/NetProxy.apk`。
+CI 构建管理器 APK 时使用临时自签名证书，不会覆盖 `src/module/NetProxy.apk`；本地发布构建仍需通过环境变量提供签名材料。
 
 ## 功能
 

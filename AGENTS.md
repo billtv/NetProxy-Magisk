@@ -78,7 +78,7 @@ src/module/service.sh
 - 遵循现有 miuix 视觉和交互：二级页使用 `AdaptiveTopAppBar`，分组标题使用 miuix `SmallTitle`，列表保持 Lazy item 粒度，卡片优先复用 `groupedCardItems`。有 miuix 对应组件时不另造 Material 风格替代品。
 - Navigation3 是导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
-- `src/module/NetProxy.apk` 是独立维护的含管理器包发行资产。本地 Android 构建和普通 CI 不得自动覆盖它；标准包必须排除该 APK。
+- `src/module/NetProxy.apk` 是独立维护的可选模块内置管理器资产。本地 Android 构建和 CI 不得自动覆盖它；标准模块包必须排除该 APK，CI 发布独立的管理器 APK。
 
 ## WebUI
 
@@ -352,8 +352,8 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 ## 构建与发布
 
 - 构建动作先测试并交叉编译 `netproxy-native`，再构建 WebUI，最后打包模块。
-- 标准包不包含 `NetProxy.apk`；文件名带 `_with-manager` 的包仅额外携带该 APK，代理能力保持一致。
-- Android 管理器不由普通模块 CI 构建或发布，Google Play 是推荐更新渠道；内置 APK 为无 Play 环境保留。
+- 标准模块包不包含 `NetProxy.apk`；管理器 APK 由独立构建步骤签名并作为 Release 资产发布，代理能力与模块包保持分离。
+- CI 使用临时自签名证书构建管理器 APK，不覆盖仓库内的 `src/module/NetProxy.apk`；Google Play 仍是推荐更新渠道。
 - `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；高风险或大版本更新进入报告，不自动静默升级。
 
 ## 安全边界

@@ -10,17 +10,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/v/release/Fanju6/NetProxy-Magisk?style=flat-square&label=Release&color=blue" alt="Latest Release" />
+  <a href="https://github.com/billtv/NetProxy-Magisk/releases">
+    <img src="https://img.shields.io/github/v/release/billtv/NetProxy-Magisk?style=flat-square&label=Release&color=blue" alt="Latest Release" />
   </a>
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/downloads/Fanju6/NetProxy-Magisk/total?style=flat-square&color=green" alt="Downloads" />
+  <a href="https://github.com/billtv/NetProxy-Magisk/releases">
+    <img src="https://img.shields.io/github/downloads/billtv/NetProxy-Magisk/total?style=flat-square&color=green" alt="Downloads" />
   </a>
   <img src="https://img.shields.io/badge/Core-sing--box-blueviolet?style=flat-square" alt="sing-box Core" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">下载模块</a> ·
+  <a href="https://github.com/billtv/NetProxy-Magisk/releases">下载模块</a> ·
   <a href="https://www.netproxy.store/">使用文档</a> ·
   <a href="https://play.google.com/store/apps/details?id=com.fanjv.netproxy">Android 管理器</a> ·
   <a href="src/android/">管理器源码</a> ·
@@ -48,7 +48,7 @@ src/webui/           模块 WebUI
 src/android/         Android 管理器
 ```
 
-Android 管理器与模块共用 `netproxyctl` 的 `schema=1` JSON 契约，但保持独立的本地构建流程。仓库 CI 不编译或发布管理器，推荐通过 Google Play 安装更新；另提供含管理器 APK 的模块包，供无法使用 Google Play 的设备安装。Android 构建说明见 [管理器源码](src/android/)。
+Android 管理器与模块共用 `netproxyctl` 的 `schema=1` JSON 契约，但保持独立的本地构建流程。仓库 Actions 会在同步上游或推送主分支后构建模块 ZIP 与自签名管理器 APK，Release 只保留这两个资产；Google Play 仍是管理器的推荐更新渠道。Android 构建说明见 [管理器源码](src/android/)。
 
 ## 管理入口
 
@@ -89,22 +89,22 @@ Clash API 与 Service API 默认只监听本机。需要从其他设备访问时
 
 ## 安装
 
-Release 页面提供以下两个版本：
+Release 页面只提供以下两个文件：
 
 | 版本 | 文件名 | 包含内容 | 适用设备 |
 |------|--------|----------|----------|
-| **标准包** | `NetProxy_<版本>_<构建号>.zip` | sing-box、NetProxy 原生组件、模块 WebUI、zashboard、CLI 与 eBPF | 默认推荐；通过 Google Play 安装管理器，或使用 CLI / WebUI |
-| **含管理器包** | `NetProxy_<版本>_<构建号>_with-manager.zip` | 标准包全部内容，以及刷入时可选安装的 Android 管理器 APK | 无法使用 Google Play、需要随模块安装管理器的设备 |
+| **模块 ZIP** | `NetProxy_<版本>_<构建号>.zip` | sing-box、NetProxy 原生组件、模块 WebUI、zashboard、CLI 与 eBPF | 在 Magisk、KernelSU 或 APatch 中刷入 |
+| **管理器 APK** | `NetProxyManager_<版本>_<构建号>.apk` | 独立的 Android 管理器，自签名构建 | 无法使用 Google Play 时手动安装 |
 
-两个包的代理能力完全一致。标准包也是模块自更新的默认下载目标；只有需要随模块刷入管理器时才选择**含管理器包**。
+模块 ZIP 不内置管理器 APK；CI 每次构建使用临时自签名证书，跨构建升级可能需要确认签名变化。
 
 > [!IMPORTANT]
 > eBPF 入站需要内核启用 BPF、cgroup v2 与 cgroup socket attach 能力。热点共享还需要可用的 TC eBPF 支持；不满足要求的内核无法启动本版本。
 
-1. 从 [Releases](https://github.com/Fanju6/NetProxy-Magisk/releases) 下载最新模块 ZIP。
+1. 从 [Releases](https://github.com/billtv/NetProxy-Magisk/releases) 下载模块 ZIP；需要管理器时另下载 APK。
 2. 在 Magisk、KernelSU 或 APatch 中刷入模块。
 3. 更新已有模块时，按安装提示选择“保留现有数据”或“全新安装”；超时默认保留现有数据。
-4. 含管理器包会提供随附 APK 的安装选项；标准包不显示该步骤。
+4. 需要管理器时单独安装 Release 中的 APK；通过 Google Play 安装的版本可能因签名不同而不能直接覆盖。
 5. 已开机刷入会在后台应用新版本，无需重启；Recovery 刷入完成后需要重启设备。
 6. 导入并选择节点，再通过管理器、模块 WebUI 或 CLI 启动服务。
 
@@ -289,8 +289,8 @@ su -c '/data/adb/modules/netproxy/netproxyctl logs export /sdcard/Download/netpr
 - [贡献指南](CONTRIBUTING.md)
 - [架构说明与编码代理约束](AGENTS.md)
 - [Telegram 群组](https://t.me/NetProxy_Magisk)
-- [提交 Issue](https://github.com/Fanju6/NetProxy-Magisk/issues)
-- [提交 Pull Request](https://github.com/Fanju6/NetProxy-Magisk/pulls)
+- [提交 Issue](https://github.com/billtv/NetProxy-Magisk/issues)
+- [提交 Pull Request](https://github.com/billtv/NetProxy-Magisk/pulls)
 
 ## 许可证
 
@@ -298,4 +298,4 @@ su -c '/data/adb/modules/netproxy/netproxyctl logs export /sdcard/Download/netpr
 
 ## Star
 
-[![Star History Chart](https://star-history.dera.page/svg?repos=Fanju6/NetProxy-Magisk&type=date&legend=top-left)](https://star-history.dera.page/#Fanju6/NetProxy-Magisk&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=billtv/NetProxy-Magisk&type=date&legend=top-left)](https://star-history.dera.page/#billtv/NetProxy-Magisk&type=date&legend=top-left)

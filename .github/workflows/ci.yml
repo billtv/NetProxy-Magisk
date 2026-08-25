@@ -1,4 +1,4 @@
-name: 持续集成（构建与开发包）
+name: 持续集成（构建与发布）
 
 on:
   workflow_dispatch:
@@ -12,6 +12,7 @@ on:
       - 'tests/**'
       - '.github/workflows/ci.yml'
       - '.github/actions/build-module/**'
+      - '.github/actions/build-manager/**'
       - '.github/scripts/**'
 
 permissions:
@@ -74,7 +75,7 @@ jobs:
         run: ./gradlew testDebugUnitTest lintDebug --no-daemon
 
   build:
-    name: 构建与发布开发包
+    name: 构建并发布开发包
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +94,10 @@ jobs:
         id: pack
         uses: ./.github/actions/build-module
 
+      - name: 构建并签名管理器 APK
+        id: manager
+        uses: ./.github/actions/build-manager
+
       - name: 发布 Pre-release 到 GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,7 +111,6 @@ jobs:
           # 创建新的 nightly 发布并上传资产
           gh release create nightly \
             --prerelease \
-            --generate-notes \
             --title "nightly Pre-release" \
             --notes "同步最新代码变更，仅保留最新版本的构建产物。
 
@@ -114,7 +118,7 @@ jobs:
             构建时间: ${{ env.TIMESTAMP }}
             提交: \`${{ env.SHORT_HASH }}\`" \
             "${{ steps.pack.outputs.standard_name }}" \
-            "${{ steps.pack.outputs.manager_name }}"
+            "${{ steps.manager.outputs.apk_name }}"
 
       - name: Telegram 构建成功通知
         if: success()
@@ -131,6 +135,8 @@ jobs:
             说明: ${{ env.COMMIT_MESSAGE }}
 
             [下载开发包](${{ github.server_url }}/${{ github.repository }}/releases/tag/nightly)
+            [模块 ZIP](${{ github.server_url }}/${{ github.repository }}/releases/download/nightly/${{ steps.pack.outputs.standard_name }})
+            [管理器 APK](${{ github.server_url }}/${{ github.repository }}/releases/download/nightly/${{ steps.manager.outputs.apk_name }})
             [提交记录](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
             [构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 

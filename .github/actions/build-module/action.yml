@@ -1,5 +1,5 @@
 name: 构建并打包模块
-description: 构建 WebUI、写入 versionCode，并打出标准包与含管理器包
+description: 构建 WebUI、写入 versionCode，并打出标准模块包
 
 # 被 ci.yml 与 release.yml 复用的共享打包逻辑（调用前需已 checkout，且 fetch-depth: 0 以便统计提交数）
 outputs:
@@ -12,9 +12,6 @@ outputs:
   standard_name:
     description: 标准包文件名
     value: ${{ steps.meta.outputs.standard_name }}
-  manager_name:
-    description: 含管理器包文件名
-    value: ${{ steps.meta.outputs.manager_name }}
 
 runs:
   using: composite
@@ -83,17 +80,13 @@ runs:
           echo "version=$VERSION"
           echo "commit_count=$COMMIT_COUNT"
           echo "standard_name=NetProxy_${VERSION}_${COMMIT_COUNT}.zip"
-          echo "manager_name=NetProxy_${VERSION}_${COMMIT_COUNT}_with-manager.zip"
         } >> "$GITHUB_OUTPUT"
 
-    - name: 打包模块（标准 / 含管理器）
+    - name: 打包标准模块
       shell: bash
       working-directory: src/module
       env:
         STANDARD_NAME: ${{ steps.meta.outputs.standard_name }}
-        MANAGER_NAME: ${{ steps.meta.outputs.manager_name }}
       run: |
-        # 标准包不内置 Android 管理器，代理、CLI 和 Web 面板能力完整。
+        # 管理器 APK 作为独立 Release 资产发布，标准模块包不内置该 APK。
         7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"
-        # 含管理器包只额外携带安装阶段可选安装的 Android APK。
-        7z a -tzip -mx=9 "../../$MANAGER_NAME" .

@@ -1,0 +1,94 @@
+name: 构建自签名管理器 APK
+description: 使用临时自签名证书构建并校验 Android 管理器 Release APK
+
+outputs:
+  apk_name:
+    description: 管理器 APK 文件名
+    value: ${{ steps.meta.outputs.apk_name }}
+  sha256:
+    description: 管理器 APK 的 SHA-256
+    value: ${{ steps.meta.outputs.sha256 }}
+
+runs:
+  using: composite
+  steps:
+    - name: 配置 Java
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 21
+
+    - name: 配置 Gradle
+      uses: gradle/actions/setup-gradle@v5
+
+    - name: 配置 Android SDK
+      uses: android-actions/setup-android@v4
+
+    - name: 安装 Android SDK 组件
+      shell: bash
+      run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' --channel=1
+
+    - name: 生成临时自签名证书
+      id: signing
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        keystore="$RUNNER_TEMP/netproxy-manager-release.keystore"
+        password="$(openssl rand -hex 32)"
+        echo "::add-mask::$password"
+
+        keytool -genkeypair \
+          -noprompt \
+          -storetype PKCS12 \
+          -keystore "$keystore" \
+          -storepass "$password" \
+          -keypass "$password" \
+          -alias netproxy-manager \
+          -keyalg RSA \
+          -keysize 4096 \
+          -sigalg SHA256withRSA \
+          -validity 36500 \
+          -dname 'CN=NetProxy Manager, O=billtv, C=CN'
+
+        {
+          echo "keystore=$keystore"
+          echo "password=$password"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: 构建 Release APK
+      working-directory: src/android
+      shell: bash
+      env:
+        NETPROXY_RELEASE_STORE_FILE: ${{ steps.signing.outputs.keystore }}
+        NETPROXY_RELEASE_STORE_PASSWORD: ${{ steps.signing.outputs.password }}
+        NETPROXY_RELEASE_KEY_ALIAS: netproxy-manager
+        NETPROXY_RELEASE_KEY_PASSWORD: ${{ steps.signing.outputs.password }}
+      run: ./gradlew :app:assembleRelease --no-daemon
+
+    - name: 整理并校验 APK
+      id: meta
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version="$(sed -n 's/^version=//p' src/module/module.prop | head -n 1)"
+        commit_count="$(git rev-list --count HEAD)"
+        source="src/android/app/build/outputs/apk/release/app-release.apk"
+        apk_name="NetProxyManager_${version}_${commit_count}.apk"
+
+        test -s "$source"
+        install -m 0644 "$source" "$apk_name"
+
+        sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is unavailable}}"
+        apksigner="$(find "$sdk_root/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+        test -x "$apksigner"
+        "$apksigner" verify --verbose --print-certs "$apk_name"
+
+        sha256="$(sha256sum "$apk_name" | cut -d ' ' -f 1)"
+        {
+          echo "apk_name=$apk_name"
+          echo "sha256=$sha256"
+        } >> "$GITHUB_OUTPUT"
+
+        printf 'APK: %s\nSHA-256: %s\n' "$apk_name" "$sha256"
