@@ -1,13 +1,12 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
+
+	json "encoding/json/v2"
 )
 
 func (c *cli) forwardModule(args []string, action string) int {
@@ -45,21 +44,15 @@ func (c *cli) catalogArgs(args ...string) []string {
 }
 
 func (c *cli) fail(code, message string, status int) int {
+	return c.failData(code, message, map[string]any{}, status)
+}
+
+func (c *cli) failData(code, message string, data any, status int) int {
 	if status <= 0 {
 		status = 1
 	}
-	writeJSON(os.Stdout, result{Schema: 1, OK: false, Code: code, Message: message, Data: map[string]any{}})
+	writeJSON(os.Stdout, result{Schema: 1, OK: false, Code: code, Message: message, Data: data})
 	return status
-}
-
-func (c *cli) forwardDiagnostics(content string) {
-	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || isErrorResult(line) {
-			continue
-		}
-		fmt.Fprintln(os.Stderr, line)
-	}
 }
 
 func (c *cli) help() {
@@ -85,9 +78,10 @@ stdout 只包含 schema=1 结果，运行日志写入 stderr。`)
 }
 
 func writeJSON(writer io.Writer, value any) {
-	encoder := json.NewEncoder(writer)
-	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(value)
+	if err := json.MarshalWrite(writer, value, json.Deterministic(true)); err != nil {
+		return
+	}
+	_, _ = io.WriteString(writer, "\n")
 }
 
 func splitReference(reference string) (string, string, bool) {
@@ -100,34 +94,4 @@ func first(values []string) string {
 		return ""
 	}
 	return values[0]
-}
-
-func isErrorResult(line string) bool {
-	return strings.HasPrefix(line, "{") && strings.Contains(line, `"schema":1`) && strings.Contains(line, `"ok":false`)
-}
-
-func lastErrorResult(content string) string {
-	last := ""
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if isErrorResult(line) {
-			last = line
-		}
-	}
-	return last
-}
-
-func nativeErrorMessage(err error, diagnostics string) string {
-	if text := strings.TrimSpace(diagnostics); text != "" {
-		return text
-	}
-	return err.Error()
-}
-
-func exitCode(err error) int {
-	var processError *exec.ExitError
-	if errors.As(err, &processError) && processError.ExitCode() > 0 {
-		return processError.ExitCode()
-	}
-	return 1
 }

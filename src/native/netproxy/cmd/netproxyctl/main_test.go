@@ -1,11 +1,20 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestWriteJSONPreservesEmptyDataObject(t *testing.T) {
+	var output bytes.Buffer
+	writeJSON(&output, result{Schema: 1, OK: false, Code: "test.failed", Message: "测试失败", Data: map[string]any{}})
+	if !strings.Contains(output.String(), `"data":{}`) {
+		t.Fatalf("schema=1 空 data 对象丢失: %s", output.String())
+	}
+}
 
 func TestModuleArgsKeepsOperationBeforeFlags(t *testing.T) {
 	command := &cli{
@@ -97,18 +106,15 @@ func TestDefaultTimeoutDoesNotPreemptSubscriptionMutation(t *testing.T) {
 	}
 }
 
-func TestGracefulNativeDeadlinePrecedesHardDeadline(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	parentDeadline, _ := ctx.Deadline()
-	childDeadline, ok := gracefulNativeDeadline(ctx, []string{"module", "sub", "edit"})
-	if !ok {
-		t.Fatal("subscription edit should receive a graceful Native deadline")
+func TestInternalUsageListsCurrentModuleActions(t *testing.T) {
+	usage := internalUsageText()
+	want := "module <boot|prepare|select|mode|network|app|node|sub|config|logs|service>"
+	if !strings.Contains(usage, want) {
+		t.Fatalf("usage missing current module actions: %s", usage)
 	}
-	if got := parentDeadline.Sub(childDeadline); got < nativeShutdownGrace-time.Millisecond || got > nativeShutdownGrace+time.Millisecond {
-		t.Fatalf("Native grace = %s, want %s", got, nativeShutdownGrace)
-	}
-	if _, ok := gracefulNativeDeadline(ctx, []string{"module", "service", "start"}); ok {
-		t.Fatal("non-subscription command should keep the hard deadline behavior")
+	for _, removed := range []string{"|sync|", "|state|", "netproxy-native"} {
+		if strings.Contains(usage, removed) {
+			t.Fatalf("usage still lists removed entry %q: %s", removed, usage)
+		}
 	}
 }
