@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,7 +72,7 @@ type Options struct {
 	PIDFile        string
 	LogFile        string
 	ModuleConf     string
-	NativePath     string
+	ExecutablePath string
 	SingBoxPath    string
 	ServiceAddress string
 	ServiceSecret  string
@@ -106,7 +107,7 @@ const (
 // Status 描述 Worker 的进程和下一次任务。
 type Status struct {
 	State   string `json:"state"`
-	PID     int    `json:"pid,omitempty"`
+	PID     int    `json:"pid,omitzero"`
 	Nearest int64  `json:"nearest"`
 }
 
@@ -330,10 +331,8 @@ func (summary Summary) failureKind(runErr error) workerFailureKind {
 	if runErr != nil {
 		return classifyWorkerError(runErr)
 	}
-	for _, kind := range summary.failureKinds {
-		if kind == workerFailurePermanent {
-			return workerFailurePermanent
-		}
+	if slices.Contains(summary.failureKinds, workerFailurePermanent) {
+		return workerFailurePermanent
 	}
 	return workerFailureTransient
 }
@@ -371,8 +370,7 @@ func classifyWorkerError(err error) workerFailureKind {
 	if errors.As(err, &networkError) && networkError.Timeout() {
 		return workerFailureTransient
 	}
-	var subscriptionError *subscription.Error
-	if errors.As(err, &subscriptionError) {
+	if subscriptionError, ok := errors.AsType[*subscription.Error](err); ok {
 		switch subscriptionError.Code {
 		case "subscription.runtime_sync_failed", "subscription.busy":
 			return workerFailureTransient
@@ -618,8 +616,8 @@ func runtimeProviderMatches(outbounds []serviceapi.GroupItem, runtimeTag string,
 	prefix := runtimeTag + "/"
 	present := make(map[string]struct{}, len(expected))
 	for _, outbound := range outbounds {
-		if strings.HasPrefix(outbound.Tag, prefix) {
-			present[strings.TrimPrefix(outbound.Tag, prefix)] = struct{}{}
+		if after, ok := strings.CutPrefix(outbound.Tag, prefix); ok {
+			present[after] = struct{}{}
 		}
 	}
 	if len(present) != len(expected) {
@@ -706,10 +704,10 @@ func fallbackMissingNode(ctx context.Context, options Options, groupID string, l
 }
 
 func reloadService(ctx context.Context, options Options) error {
-	if strings.TrimSpace(options.NativePath) == "" {
-		return errors.New("未配置 NetProxy 原生组件路径")
+	if strings.TrimSpace(options.ExecutablePath) == "" {
+		return errors.New("未配置 netproxyctl 路径")
 	}
-	command := exec.CommandContext(ctx, options.NativePath, reloadServiceArguments(options)...)
+	command := exec.CommandContext(ctx, options.ExecutablePath, reloadServiceArguments(options)...)
 	command.Stdout = io.Discard
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
@@ -725,7 +723,7 @@ func reloadService(ctx context.Context, options Options) error {
 func reloadServiceArguments(options Options) []string {
 	moduleDir := filepath.Dir(filepath.Dir(options.Root))
 	return []string{
-		"module", "service", "reload",
+		"__internal", "module", "service", "reload",
 		"--module-dir", moduleDir,
 		"--catalog-root", options.Root,
 		"--module-config", options.ModuleConf,

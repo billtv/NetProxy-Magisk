@@ -3,8 +3,6 @@ package catalog
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +11,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"uuid"
+
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
@@ -37,25 +39,25 @@ func isGroupDir(entry os.DirEntry) bool {
 }
 
 type GroupSummary struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	RuntimeTag        string          `json:"runtime_tag"`
-	Type              string          `json:"type"`
-	Active            bool            `json:"active"`
-	NodeCount         int             `json:"node_count"`
-	Revision          int64           `json:"revision"`
-	AutoUpdate        bool            `json:"auto_update"`
-	UpdateInterval    int64           `json:"update_interval"`
-	UpdateViaProxy    string          `json:"update_via_proxy"`
-	Usage             json.RawMessage `json:"usage"`
-	ProfileTitle      string          `json:"profile_title"`
-	ProfileWebPageURL string          `json:"profile_web_page_url"`
-	LastAttemptAt     string          `json:"last_attempt_at"`
-	LastSuccessAt     string          `json:"last_success_at"`
-	NextUpdateAt      string          `json:"next_update_at"`
-	LastError         string          `json:"last_error"`
-	UpdatedAt         string          `json:"updated_at"`
-	Progress          json.RawMessage `json:"progress"`
+	ID                string         `json:"id"`
+	Name              string         `json:"name"`
+	RuntimeTag        string         `json:"runtime_tag"`
+	Type              string         `json:"type"`
+	Active            bool           `json:"active"`
+	NodeCount         int            `json:"node_count"`
+	Revision          int64          `json:"revision"`
+	AutoUpdate        bool           `json:"auto_update"`
+	UpdateInterval    int64          `json:"update_interval"`
+	UpdateViaProxy    string         `json:"update_via_proxy"`
+	Usage             jsontext.Value `json:"usage"`
+	ProfileTitle      string         `json:"profile_title"`
+	ProfileWebPageURL string         `json:"profile_web_page_url"`
+	LastAttemptAt     string         `json:"last_attempt_at"`
+	LastSuccessAt     string         `json:"last_success_at"`
+	NextUpdateAt      string         `json:"next_update_at"`
+	LastError         string         `json:"last_error"`
+	UpdatedAt         string         `json:"updated_at"`
+	Progress          jsontext.Value `json:"progress"`
 }
 
 type GroupSnapshot struct {
@@ -104,7 +106,7 @@ func Scan(ctx context.Context, options ScanOptions) ([]GroupSnapshot, error) {
 		return nil, err
 	}
 	defer release()
-	groups, err := loadGroups(ctx, options.Root, true, options.WithNodes)
+	groups, err := loadGroups(ctx, options.Root, true)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +118,13 @@ func Scan(ctx context.Context, options ScanOptions) ([]GroupSnapshot, error) {
 		}
 		if options.GroupID != "" && group.ID != options.GroupID {
 			continue
+		}
+		if options.WithNodes {
+			nodes, err := provider.InspectFile(ctx, group.ProviderPath)
+			if err != nil {
+				return nil, fmt.Errorf("读取分组 %s Provider: %w", group.ID, err)
+			}
+			group.Nodes = nodes
 		}
 		summary := summaryFor(group, options.ActiveGroup, options.ProgressDir)
 		nodes := []provider.NodeSummary{}
@@ -239,8 +248,8 @@ func GroupIDs(root, groupType string) ([]string, error) {
 	return ids, nil
 }
 
-// NewGroupID 为新订阅或本地文件分组生成不冲突的 ID。
-func NewGroupID(root, kind, source string) (string, error) {
+// NewSubscriptionGroupID 为新订阅生成不冲突的稳定 ID。
+func NewSubscriptionGroupID(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("Catalog 根目录不能为空")
 	}
@@ -249,65 +258,17 @@ func NewGroupID(root, kind, source string) (string, error) {
 		return "", err
 	}
 	defer release()
-	switch kind {
-	case "subscription":
-		for attempt := 0; attempt < 16; attempt++ {
-			var raw [16]byte
-			if _, err := rand.Read(raw[:]); err != nil {
-				return "", err
-			}
-			raw[6] = (raw[6] & 0x0f) | 0x40
-			raw[8] = (raw[8] & 0x3f) | 0x80
-			candidate := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-				raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
-			if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
-				continue
-			} else if os.IsNotExist(err) {
-				return candidate, nil
-			} else {
-				return "", err
-			}
+	for range 16 {
+		candidate := uuid.NewV4().String()
+		if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
+			continue
+		} else if os.IsNotExist(err) {
+			return candidate, nil
+		} else {
+			return "", err
 		}
-		return "", errors.New("无法生成不冲突的订阅分组 ID")
-	case "file", "local":
-		name := filepath.Base(strings.TrimSpace(source))
-		if name == "." || name == string(filepath.Separator) || name == "" {
-			name = fmt.Sprintf("%d", time.Now().Unix())
-		}
-		if extension := filepath.Ext(name); extension != "" {
-			name = strings.TrimSuffix(name, extension)
-		}
-		var builder strings.Builder
-		lastDash := false
-		for _, char := range strings.ToLower(name) {
-			valid := (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '.' || char == '_' || char == '-'
-			if valid {
-				builder.WriteRune(char)
-				lastDash = false
-			} else if !lastDash {
-				builder.WriteByte('-')
-				lastDash = true
-			}
-		}
-		slug := strings.Trim(builder.String(), ".-")
-		if slug == "" {
-			slug = fmt.Sprintf("%d", time.Now().Unix())
-		}
-		base := "local-" + slug
-		candidate := base
-		for suffix := 2; ; suffix++ {
-			if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
-				candidate = fmt.Sprintf("%s-%d", base, suffix)
-				continue
-			} else if os.IsNotExist(err) {
-				return candidate, nil
-			} else {
-				return "", err
-			}
-		}
-	default:
-		return "", fmt.Errorf("未知 Catalog 分组 ID 类型: %s", kind)
 	}
+	return "", errors.New("无法生成不冲突的订阅分组 ID")
 }
 
 func BuildRuntime(ctx context.Context, options RuntimeOptions) (RuntimeResult, error) {
@@ -330,7 +291,7 @@ func BuildRuntime(ctx context.Context, options RuntimeOptions) (RuntimeResult, e
 		options.SelectedNodeRef = module.SelectedNodeRef
 		outboundMode = module.OutboundMode
 	}
-	groups, err := loadGroups(ctx, options.Root, false, true)
+	groups, err := loadGroups(ctx, options.Root, false)
 	if err != nil {
 		return RuntimeResult{}, err
 	}
@@ -351,11 +312,23 @@ func BuildRuntime(ctx context.Context, options RuntimeOptions) (RuntimeResult, e
 		activeIndex = 0
 		active = groups[0].ID
 	}
-	selector := normalizeSelector(options.SelectorMode)
-	selected := options.SelectedNodeRef
-	if selector == "manual" && !containsNode(groups[activeIndex], selected) {
+	selector := options.SelectorMode
+	if selector == "" {
 		selector = "urltest"
-		selected = ""
+	}
+	if selector != "urltest" && selector != "manual" {
+		return RuntimeResult{}, fmt.Errorf("未知节点选择模式: %s", selector)
+	}
+	selected := options.SelectedNodeRef
+	if selector == "manual" {
+		contains, err := containsNode(ctx, groups[activeIndex], selected)
+		if err != nil {
+			return RuntimeResult{}, fmt.Errorf("检查活动节点引用失败: %w", err)
+		}
+		if !contains {
+			selector = "urltest"
+			selected = ""
+		}
 	}
 	if selector == "urltest" {
 		selected = ""
@@ -370,7 +343,7 @@ func BuildRuntime(ctx context.Context, options RuntimeOptions) (RuntimeResult, e
 
 	nodeCount := 0
 	for _, group := range groups {
-		nodeCount += len(group.Nodes)
+		nodeCount += group.Metadata.NodeCount
 	}
 	result := RuntimeResult{
 		ActiveGroup:     active,
@@ -393,13 +366,16 @@ type loadedGroup struct {
 	hasNodes     bool
 }
 
-func loadGroups(ctx context.Context, root string, includeEmpty, withNodes bool) ([]*loadedGroup, error) {
+func loadGroups(ctx context.Context, root string, includeEmpty bool) ([]*loadedGroup, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
 	groups := make([]*loadedGroup, 0, len(entries))
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !isGroupDir(entry) {
 			continue
 		}
@@ -409,24 +385,12 @@ func loadGroups(ctx context.Context, root string, includeEmpty, withNodes bool) 
 			return nil, fmt.Errorf("读取分组 %s 元数据: %w", entry.Name(), err)
 		}
 		providerPath := filepath.Join(groupDir, "provider.json")
-		if !withNodes {
-			groups = append(groups, &loadedGroup{
-				ID: entry.Name(), Metadata: metadata, ProviderPath: providerPath,
-				hasNodes: metadata.NodeCount > 0,
-			})
-			continue
-		}
-		document, err := provider.LoadAllowEmpty(ctx, providerPath)
-		if err != nil {
-			return nil, fmt.Errorf("读取分组 %s Provider: %w", entry.Name(), err)
-		}
-		nodes := provider.Inspect(document)
-		if !includeEmpty && len(nodes) == 0 {
+		if !includeEmpty && metadata.NodeCount <= 0 {
 			continue
 		}
 		groups = append(groups, &loadedGroup{
 			ID: entry.Name(), Metadata: metadata, ProviderPath: providerPath,
-			Nodes: nodes, hasNodes: len(nodes) > 0,
+			hasNodes: metadata.NodeCount > 0,
 		})
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })
@@ -469,26 +433,12 @@ func findGroup(groups []*loadedGroup, id string) int {
 	return -1
 }
 
-func normalizeSelector(mode string) string {
-	switch mode {
-	case "manual", "selector":
-		return "manual"
-	default:
-		return "urltest"
-	}
-}
-
-func containsNode(group *loadedGroup, reference string) bool {
+func containsNode(ctx context.Context, group *loadedGroup, reference string) (bool, error) {
 	groupID, tag, found := strings.Cut(reference, "/")
 	if !found || groupID != group.ID || tag == "" {
-		return false
+		return false, nil
 	}
-	for _, node := range group.Nodes {
-		if node.Tag == tag {
-			return true
-		}
-	}
-	return false
+	return provider.FileContainsTag(ctx, group.ProviderPath, tag)
 }
 
 func writeRuntimeProviders(path string, groups []*loadedGroup) error {
@@ -527,7 +477,7 @@ func writeRuntimeOutbounds(path string, groups []*loadedGroup, activeTag, select
 				Type: C.TypeURLTest,
 				Tag:  autoTag,
 				Options: &option.URLTestOutboundOptions{
-					GroupCommonOption:         option.GroupCommonOption{Providers: []string{group.RuntimeTag}},
+					Providers:                 []string{group.RuntimeTag},
 					URL:                       "https://www.gstatic.com/generate_204",
 					Interval:                  badoption.Duration(3 * time.Minute),
 					Tolerance:                 50,
@@ -538,7 +488,7 @@ func writeRuntimeOutbounds(path string, groups []*loadedGroup, activeTag, select
 				Type: C.TypeSelector,
 				Tag:  selectTag,
 				Options: &option.SelectorOutboundOptions{
-					GroupCommonOption:         option.GroupCommonOption{Providers: []string{group.RuntimeTag}},
+					Providers:                 []string{group.RuntimeTag},
 					InterruptExistConnections: true,
 				},
 			},
@@ -553,7 +503,7 @@ func writeRuntimeOutbounds(path string, groups []*loadedGroup, activeTag, select
 		Type: C.TypeSelector,
 		Tag:  "Proxy",
 		Options: &option.SelectorOutboundOptions{
-			GroupCommonOption:         option.GroupCommonOption{Outbounds: options},
+			Outbounds:                 options,
 			Default:                   defaultTag,
 			InterruptExistConnections: true,
 		},
@@ -569,7 +519,7 @@ func writeRuntimeOutboundsAtomic(path string, outbounds []option.Outbound) error
 		return err
 	}
 	var document struct {
-		Outbounds []map[string]json.RawMessage `json:"outbounds"`
+		Outbounds []map[string]jsontext.Value `json:"outbounds"`
 	}
 	if err := json.Unmarshal(content, &document); err != nil {
 		return err
@@ -607,16 +557,16 @@ func writeRuntimeJSONAtomic(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	var formatted bytes.Buffer
-	if err := json.Indent(&formatted, content, "", "  "); err != nil {
+	formatted := jsontext.Value(append([]byte(nil), content...))
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
 		return err
 	}
-	formatted.WriteByte('\n')
-	return provider.WriteAtomic(path, formatted.Bytes(), 0o600)
+	formatted = append(formatted, '\n')
+	return provider.WriteAtomic(path, formatted, 0o600)
 }
 
 func writeJSONAtomic(path string, value any) error {
-	content, err := json.MarshalIndent(value, "", "  ")
+	content, err := json.Marshal(value, json.Deterministic(true), jsontext.WithIndent("  "))
 	if err != nil {
 		return err
 	}

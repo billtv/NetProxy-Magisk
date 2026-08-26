@@ -20,7 +20,7 @@
 
 ## 核心契约
 
-- `netproxyctl` 是终端、Android 和 WebUI 的唯一模块管理入口；`netproxy-native` 是内部实现，不是平行的公开 CLI。
+- `netproxyctl` 是仓库唯一 Go 可执行文件，也是终端、Android 和 WebUI 的唯一模块管理入口；模块生命周期使用同一二进制的隐藏 `__internal` 入口。
 - 机器接口固定使用 `schema=1` JSON。stdout 只能包含结果 JSON，日志与诊断写 stderr；字段、错误码或状态语义变化必须同步检查 Shell、Go、Android、WebUI 和测试。
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
 - Catalog 是持久节点事实源：每组使用 `data/catalog/<group-id>/meta.json` 与 `provider.json`。`staging/` 只存事务临时文件，不得作为持久状态读取。
@@ -39,7 +39,7 @@
 - `src/module/netproxyctl` 只负责定位 `bin/netproxyctl`；公共实现位于 `src/native/netproxy/cmd/netproxyctl`。Shell 不再保留公共命令 dispatcher。
 - 命令组权威清单：`service catalog node sub mode network app ebpf config logs`。新增命令组必须同时更新 Go CLI、Android `NetProxyCtlClient`、WebUI `src/exec.ts` 和契约测试。
 - `scripts/` 不承载运行时业务；配置、Catalog、状态和 Service API 业务统一由 Go 实现。
-- 根目录 `service.sh` 只保留 Magisk/KernelSU/APatch 开机桥接；运行时配置、服务生命周期、节点切换、订阅事务和调度由 `netproxy-native` 负责。
+- 根目录 `service.sh` 只保留 Magisk/KernelSU/APatch 开机桥接；运行时配置、服务生命周期、节点切换、订阅事务和调度由 `netproxyctl __internal` 负责。
 - Go Worker 负责 Android 网络变化采集、Wi-Fi 状态读取和策略评估。
 - `customize.sh` 在已开机安装时不得提前覆盖 live 模块目录；必须等待管理器写入 `update` 标记后再由脱离安装器 cgroup 的 Shell 完成目录切换。任何校验或切换失败都保留 `modules_update`，交回管理器下次开机处理。
 - 设备上的调用形式是 `su -c /data/adb/modules/netproxy/netproxyctl [--json] <命令组> <命令>`；文档和排查步骤按此形式给出，不要写成裸 `netproxyctl`，它不在 PATH 里。
@@ -67,6 +67,8 @@ src/module/service.sh
 - 允许且仅允许一个 Go Worker。它承载订阅调度和可选的 Android 网络监听，不能演变为通用控制守护进程、REST 服务或第二个代理核心。
 - 使用 reF1nd sing-box 的类型定义解析、生成和校验 Provider，不通过字符串替换拼接协议配置。
 - reF1nd 依赖版本必须与打包的 sing-box 内核兼容；升级时同时验证转换 fixtures、Provider 和 Service API。
+- Native JSON 编解码统一使用 Go 标准库 `encoding/json/v2` 与 `encoding/json/jsontext`，依赖严格字段匹配、重复键拒绝和 UTF-8 校验；持久文件与 `schema=1` 输出必须显式传入 `json.Deterministic(true)`，不要回退到 v1 或设置 `GOEXPERIMENT=nojsonv2`。
+- `cmd/netproxyctl/default.pgo` 只使用真实 Android 上的只读工作负载生成；正式构建保持 `-pgo=auto`，更新 profile 前必须确认不含订阅、节点或设备数据，并对比非 PGO 产物。
 - Provider 修改必须保持完整校验、稳定 tag、`0600` 权限和原子替换。错误必须返回结构化 diagnostics，不允许空输出加成功退出码。
 - 新增协议或修复解析缺陷时补充不含真实凭据的 fixture/golden 测试。
 
@@ -92,7 +94,7 @@ src/module/service.sh
 
 - 不提交订阅地址、节点凭据、UUID、密钥、HWID、自定义 Header、签名材料、设备日志或 `local.properties`。
 - 日志、历史和诊断包必须复用统一脱敏逻辑；修复问题时使用匿名 fixture，不把用户提供的真实链接写入测试。
-- 不手工修改 `src/module/bin/` 下的 `netproxy-native`、`sing-box`，也不手工修改 WebUI 构建目录或工作流生成的版本号。更新二进制和资源时使用对应构建/更新流程并核对来源。
+- 不手工修改 `src/module/bin/` 下的 `netproxyctl`、`sing-box`，也不手工修改 WebUI 构建目录或工作流生成的版本号。更新二进制和资源时使用对应构建/更新流程并核对来源。
 
 ## 验证
 
@@ -102,10 +104,10 @@ src/module/service.sh
 # Go 原生组件
 (cd src/native/netproxy && go test ./... && go vet ./...)
 
-# Shell/Catalog 契约（先准备 netproxy-native 测试二进制）
+# Shell/Catalog 契约（先准备 netproxyctl 测试二进制）
 mkdir -p .tmp
-(cd src/native/netproxy && go build -o ../../../.tmp/netproxy-native ./cmd/netproxy-native && go build -o ../../../.tmp/netproxyctl ./cmd/netproxyctl)
-sh tests/runtime_catalog_test.sh ./.tmp/netproxy-native
+(cd src/native/netproxy && go build -o ../../../.tmp/netproxyctl ./cmd/netproxyctl)
+sh tests/runtime_catalog_test.sh ./.tmp/netproxyctl
 sh tests/module_scripts_test.sh
 sh tests/customize_hot_update_test.sh
 
@@ -259,7 +261,7 @@ OUTBOUND_MODE=rule
 -> 创建 staging
 -> 条件下载
 -> 解析 HTTP Header
--> netproxy-native 转换
+-> netproxyctl 内部转换
 -> Provider 校验
 -> 原子替换 Provider 与元数据
 -> 通知运行中的 Local Provider
@@ -293,7 +295,7 @@ eBPF 只负责透明代理入站。停止服务由 sing-box 关闭并清理其 e
 
 节点测速不要求正式服务处于 `ready`。服务停止时，Native 只允许启动不含入站、eBPF 和 Clash API 的短生命周期 sing-box 会话，使用目标 Provider 快照与随机 loopback Service API 完成测速；会话不得修改正式服务状态、选择状态或 Worker，结束和取消时必须清理进程与临时文件。
 
-分应用配置保存 `<user-id>:<package>`，`netproxy-native ebpf runtime` 通过 Android package service 查询 UID 后生成 `include_uid` 或 `exclude_uid`。应用安装、重装、UID 变化或用户范围变化后，通过配置 reload 重新解析，不维护模块侧 UID 缓存；白名单自动包含 UID 0。
+分应用配置保存 `<user-id>:<package>`，`netproxyctl __internal ebpf runtime` 通过 Android package service 查询 UID 后生成 `include_uid` 或 `exclude_uid`。应用安装、重装、UID 变化或用户范围变化后，通过配置 reload 重新解析，不维护模块侧 UID 缓存；白名单自动包含 UID 0。
 
 本机 cgroup 与热点 shared-network 由 `EBPF_MODE` 选择。`local` 只输出 local 字段，`shared` 只输出 shared 字段，`hybrid` 同时输出两者；`shared` 与 `hybrid` 必须配置至少一个下游接口。
 
@@ -339,7 +341,7 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 - 敏感读取命令只能由 Root 客户端调用，普通列表只返回安全摘要。
 - 写操作使用稳定退出码，并保证 JSON 中 `ok` 与进程退出状态一致。
 
-`netproxy-native` 的 JSON 只供 Shell 内部使用。Android/WebUI 不绕过 `netproxyctl` 直接调用它，以免形成两套公共契约。
+`netproxyctl __internal` 只供模块生命周期内部使用。Android/WebUI 只能调用公开命令组，以免形成两套公共契约。
 
 ## 客户端边界
 
@@ -355,6 +357,8 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 - 标准模块包不包含 `NetProxy.apk`；管理器 APK 由独立构建步骤签名并作为 Release 资产发布，代理能力与模块包保持分离。
 - CI 使用临时自签名证书构建管理器 APK，不覆盖仓库内的 `src/module/NetProxy.apk`；Google Play 仍是推荐更新渠道。
 - 上游代码、资源和依赖通过上游同步或普通提交进入统一构建流程；不再启用额外的定时资源更新发布流程。
+- 本 fork 的 `build-release.yml`、`sync-upstream.yml` 和 `.github/actions/` 来自三次 CI 提交，后续上游同步必须原样保留；同步完成后只构建并发布标准 ZIP 与自签名 APK 两个资产。
+- 上游的资源更新流程可以作为源码参考，但不得替换本 fork 的双资产发布流程或新增工作流。
 
 ## 安全边界
 

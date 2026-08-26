@@ -25,10 +25,16 @@ func TestNodeImportAppendsToDefaultGroup(t *testing.T) {
 	if err := os.WriteFile(options.ModuleConfig, []byte("ACTIVE_GROUP_ID=default\nSELECTOR_MODE=urltest\nSELECTED_NODE_REF=\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := catalog.ImportGroup(context.Background(), catalog.ImportOptions{
-		Root: options.CatalogRoot, GroupID: "default", Name: "已有本地配置", Input: "socks://existing.example:1080#EXISTING",
+	if err := catalog.InitializeGroup(context.Background(), catalog.GroupOptions{
+		Root: options.CatalogRoot, GroupID: "default", Name: "已有本地配置", Type: "local",
 	}); err != nil {
 		t.Fatalf("initialize default group: %v", err)
+	}
+	if _, err := catalog.AppendNode(context.Background(), catalog.MutationOptions{
+		GroupDir: filepath.Join(options.CatalogRoot, "default"), GroupID: "default",
+		Name: "已有本地配置", Type: "local", Input: "socks://existing.example:1080#EXISTING",
+	}); err != nil {
+		t.Fatalf("append existing node: %v", err)
 	}
 	input := filepath.Join(root, "selected-nodes.yaml")
 	if err := os.WriteFile(input, []byte("socks://one.example:1081#IMPORTED\nsocks://two.example:1082#IMPORTED_TWO\n"), 0o600); err != nil {
@@ -62,6 +68,21 @@ func TestNodeImportAppendsToDefaultGroup(t *testing.T) {
 	}
 	if metadata.Name != "已有本地配置" {
 		t.Fatalf("default group name changed unexpectedly: %q", metadata.Name)
+	}
+}
+
+func TestLoadAppPolicyReturnsTypedSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ebpf.conf")
+	content := "APP_PROXY_ENABLE=1\nAPP_PROXY_MODE=\"whitelist\"\nPROXY_APPS_LIST=\"0:com.example.one,10:com.example.two\"\nBYPASS_APPS_LIST=\"0:com.example.three\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := LoadAppPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.Enabled || policy.Mode != "whitelist" || policy.ProxyApps != "0:com.example.one,10:com.example.two" || policy.BypassApps != "0:com.example.three" {
+		t.Fatalf("unexpected app policy: %+v", policy)
 	}
 }
 

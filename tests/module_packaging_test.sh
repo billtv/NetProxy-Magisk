@@ -15,7 +15,7 @@ SYNC_WORKFLOW="$ROOT/.github/workflows/sync-upstream.yml"
 WORKFLOW_DIR="$ROOT/.github/workflows"
 
 assert_contains() {
-  grep -Fq "$2" "$1" || {
+  grep -Fq -- "$2" "$1" || {
     printf '缺少发行契约: %s\n' "$2" >&2
     return 1
   }
@@ -30,8 +30,16 @@ assert_not_contains() {
 
 assert_contains "$BUILD_ACTION" 'standard_name=NetProxy_${VERSION}_${COMMIT_COUNT}.zip'
 assert_contains "$BUILD_ACTION" '7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"'
+assert_contains "$BUILD_ACTION" './cmd/netproxyctl'
+assert_contains "$BUILD_ACTION" '-pgo=auto'
+assert_not_contains "$BUILD_ACTION" 'netproxy-native|cmd/netproxy-native'
 assert_not_contains "$BUILD_ACTION" 'full_name|lite_name|_lite'
 assert_not_contains "$BUILD_ACTION" 'manager_name|with-manager'
+
+[ ! -e "$ROOT/src/module/bin/netproxy-native" ] || {
+  printf '%s\n' '模块目录仍包含已废弃的 netproxy-native 产物' >&2
+  exit 1
+}
 
 assert_contains "$MANAGER_ACTION" 'apk_name="NetProxyManager_${version}_${commit_count}.apk"'
 assert_contains "$MANAGER_ACTION" 'echo "apk_name=$apk_name"'

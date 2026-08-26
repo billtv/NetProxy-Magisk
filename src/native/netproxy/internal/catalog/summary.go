@@ -2,14 +2,14 @@ package catalog
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 )
 
 // ReadGroupSummary 读取指定分组的持久化摘要，不读取其他分组的 Provider 内容。
@@ -57,15 +57,18 @@ func ReadGroupSummary(ctx context.Context, root, groupID, progressDir string) (G
 	summary := summaryForMetadata(metadata, runtimeTag, groupID, progressDir, metadata.NodeCount)
 
 	providerPath := filepath.Join(root, groupID, "provider.json")
-	if _, err := provider.LoadAllowEmpty(ctx, providerPath); err != nil {
+	if info, err := os.Stat(providerPath); err != nil || !info.Mode().IsRegular() {
 		summary.NodeCount = 0
+		if err == nil {
+			err = errors.New("Provider 不是普通文件")
+		}
 		return summary, fmt.Errorf("读取活动分组 %s Provider 失败: %w", groupID, err)
 	}
 	return summary, nil
 }
 
 func summaryForMetadata(metadata Metadata, runtimeTag, activeGroup, progressDir string, nodeCount int) GroupSummary {
-	progress := json.RawMessage("null")
+	progress := jsontext.Value("null")
 	if progressDir != "" {
 		if content, err := os.ReadFile(filepath.Join(progressDir, metadata.ID+".progress.json")); err == nil {
 			var state struct {
