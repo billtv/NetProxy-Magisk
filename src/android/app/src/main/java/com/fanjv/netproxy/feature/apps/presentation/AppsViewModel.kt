@@ -39,6 +39,7 @@ internal class AppsViewModel(
     private var modelJob: Job? = null
     private var searchJob: Job? = null
     private val policyMutationMutex = Mutex()
+    private val packageLookupDispatcher = Dispatchers.IO.limitedParallelism(4)
     private var loaded = false
 
     fun load(force: Boolean = false) {
@@ -236,9 +237,9 @@ internal class AppsViewModel(
                 .toList()
             val comparator = if (snapshot.appSelectedFirst) {
                 compareByDescending<AppInfoModel> { it.isProxied }
-                    .thenBy { it.label.lowercase() }
+                    .then(appLabelComparator)
             } else {
-                compareBy { it.label.lowercase() }
+                appLabelComparator
             }
             apps = apps.sortedWith(comparator)
             if (snapshot.appReverseSort) apps = apps.reversed()
@@ -253,7 +254,7 @@ internal class AppsViewModel(
     private suspend fun resolveLabels(packageIds: List<Pair<String, String>>) {
         coroutineScope {
             packageIds.distinct().map { (packageName, userId) ->
-                async(Dispatchers.IO) {
+                async(packageLookupDispatcher) {
                     val key = "$userId:$packageName"
                     if (labels.containsKey(key)) return@async
                     val label = packageLabels.computeIfAbsent(packageName) {
@@ -306,4 +307,9 @@ internal class AppsViewModel(
         if (separator <= 0 || separator == value.lastIndex) return null
         return value.substring(separator + 1) to value.substring(0, separator)
     }
+}
+
+private val appLabelComparator = Comparator<AppInfoModel> { left, right ->
+    val labelComparison = left.label.compareTo(right.label, ignoreCase = true)
+    if (labelComparison != 0) labelComparison else left.id.compareTo(right.id)
 }

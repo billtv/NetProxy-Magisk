@@ -96,10 +96,13 @@ fun AppIcon(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    var icon by remember(packageName, userId) { mutableStateOf<ImageBitmap?>(null) }
+    val iconSizePx = with(LocalDensity.current) { 40.dp.roundToPx() }
+    var icon by remember(packageName, userId, iconSizePx) {
+        mutableStateOf<ImageBitmap?>(null)
+    }
 
-    LaunchedEffect(packageName, userId) {
-        icon = AppIconCache.loadIcon(context, packageName, userId)
+    LaunchedEffect(packageName, userId, iconSizePx) {
+        icon = AppIconCache.loadIcon(context, packageName, userId, iconSizePx)
     }
 
     Box(
@@ -279,15 +282,7 @@ internal fun AppsScreen(
                         InfiniteProgressIndicator()
                     }
                 } else {
-                    var isRefreshing by remember { mutableStateOf(false) }
                     val pullToRefreshState = rememberPullToRefreshState()
-
-                    LaunchedEffect(isRefreshing) {
-                        if (isRefreshing) {
-                            viewModel.load(force = true)
-                            isRefreshing = false
-                        }
-                    }
 
                     val refreshTexts = listOf(
                         stringResource(R.string.refresh_pulling),
@@ -298,8 +293,8 @@ internal fun AppsScreen(
                     val allApps = apps.allApps
 
                     PullToRefresh(
-                        isRefreshing = isRefreshing,
-                        onRefresh = { isRefreshing = true },
+                        isRefreshing = apps.isLoadingApps,
+                        onRefresh = { viewModel.load(force = true) },
                         pullToRefreshState = pullToRefreshState,
                         refreshTexts = refreshTexts,
                         contentPadding = PaddingValues(
@@ -360,7 +355,11 @@ internal fun AppsScreen(
                                 }
 
                                 if (apps.appProxyEnabled) {
-                                    items(allApps, key = AppInfoModel::id) { app ->
+                                    items(
+                                        items = allApps,
+                                        key = AppInfoModel::id,
+                                        contentType = { "app_item" },
+                                    ) { app ->
                                         AppItem(
                                             app,
                                             apps.appShowPackageName,
@@ -400,7 +399,11 @@ internal fun AppsScreen(
                 defaultResult = { },
                 searchBarTopPadding = dynamicTopPadding,
             ) {
-                items(apps.searchResults, key = AppInfoModel::id) { app ->
+                items(
+                    items = apps.searchResults,
+                    key = AppInfoModel::id,
+                    contentType = { "app_item" },
+                ) { app ->
                     AppItem(app, apps.appShowPackageName, app.isProxied, spacing, viewModel)
                 }
             }
