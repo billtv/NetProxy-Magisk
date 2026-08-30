@@ -257,10 +257,6 @@
     <string name="settings_color_spec">配色规格</string>
     <string name="settings_enable_blur">启用页面模糊</string>
     <string name="settings_enable_blur_summary">控制顶部模糊和页面毛玻璃效果</string>
-    <string name="settings_floating_bottom_bar">悬浮底栏</string>
-    <string name="settings_floating_bottom_bar_summary">使用 Apple 风格的悬浮底栏</string>
-    <string name="settings_enable_glass">悬浮底栏玻璃效果</string>
-    <string name="settings_enable_glass_summary">为悬浮底栏启用模糊与玻璃材质</string>
     <string name="settings_smooth_corner">平滑圆角</string>
     <string name="settings_smooth_corner_summary">为界面启用 Miuix 平滑圆角效果</string>
     <string name="settings_enable_predictive_back">预测性返回手势</string>
@@ -356,14 +352,11 @@
     <string name="ebpf_local_dns_mode">本机网络 DNS 模式</string>
     <string name="ebpf_shared_dns_mode">共享网络 DNS 模式</string>
     <string name="ebpf_dns_mode_hijack">优先劫持</string>
-    <string name="ebpf_dns_mode_respect_policy">遵循完整策略</string>
+    <string name="ebpf_dns_mode_respect_policy">遵循筛选策略</string>
     <string name="ebpf_dns_mode_off">关闭</string>
     <string name="ebpf_cgroup_enable">本机透明代理</string>
     <string name="ebpf_cgroup_enable_summary">通过 cgroup 接管本机应用流量</string>
-    <string name="ebpf_local_ipv6_mode">本机网络 IPv6 接管</string>
-    <string name="ebpf_ipv6_mode_always">始终接管</string>
-    <string name="ebpf_ipv6_mode_auto">自动判断</string>
-    <string name="ebpf_ipv6_mode_off">关闭</string>
+    <string name="ebpf_local_ipv6">本机网络 IPv6 接管</string>
     <string name="ebpf_bypass_settings">内核提前绕过</string>
     <string name="ebpf_bypass_private_address">绕过私网与特殊用途地址</string>
     <string name="ebpf_bypass_rule_sets">绕过规则集</string>
@@ -371,7 +364,7 @@
     <string name="ebpf_shared_enable">共享网络代理</string>
     <string name="ebpf_shared_enable_summary">接管热点或 USB 共享的下游流量</string>
     <string name="ebpf_shared_interfaces">下游接口</string>
-    <string name="ebpf_shared_ipv6_mode">共享网络 IPv6 接管</string>
+    <string name="ebpf_shared_ipv6">共享网络 IPv6 接管</string>
     <string name="ebpf_shared_include_source_cidrs">允许来源 CIDR</string>
     <string name="ebpf_shared_exclude_source_cidrs">排除来源 CIDR</string>
     <string name="ebpf_shared_include_mac_addresses">允许来源 MAC 地址</string>
