@@ -31,7 +31,7 @@
 - eBPF 是 sing-box 的入站实现，不是独立代理核心。服务、模式和节点切换文案继续使用“服务”或“sing-box”，不要泛化为“eBPF 服务”。
 - 分应用策略持久化严格的 `<user-id>:<package>` 引用，Android 每个用户独立展示；Go 通过 Android package service 查询 UID，运行时生成 `include_uid` / `exclude_uid`。
 - `EBPF_MODE` 只允许 `local`、`shared` 或 `hybrid`；local/shared 专属字段只能在对应数据路径启用时输出。
-- Service API 与 Clash API 的固定监听和密钥位于 `02_experimental.json`、`08_services.json`。不要重新引入运行时随机 bootstrap，现有 WebUI 依赖固定入口。
+- Service API 与 Clash API 的固定监听和密钥位于 `config/singbox/config.json` 的 `services` 与 `experimental.clash_api`。不要重新引入运行时随机 bootstrap，现有 WebUI 依赖固定入口。
 - 服务状态只允许 `stopped/preparing/starting/ready/stopping/failed`。`ready_at` 只能在 sing-box API 与 eBPF 入站均就绪后写入。
 - `service status` 的 `outbound_mode` 表示核心当前实际生效模式；用户在 `module.conf` 中保存的基础模式由 `configured_outbound_mode` 表示。Wi-Fi 自动切换不得覆盖基础模式。
 
@@ -71,6 +71,7 @@ src/module/service.sh
 - Native JSON 编解码统一使用 Go 标准库 `encoding/json/v2` 与 `encoding/json/jsontext`，依赖严格字段匹配、重复键拒绝和 UTF-8 校验；持久文件与 `schema=1` 输出必须显式传入 `json.Deterministic(true)`，不要回退到 v1 或设置 `GOEXPERIMENT=nojsonv2`。
 - `cmd/netproxyctl/default.pgo` 只使用真实 Android 上的只读工作负载生成；正式构建保持 `-pgo=auto`，更新 profile 前必须确认不含订阅、节点或设备数据，并对比非 PGO 产物。
 - Provider 修改必须保持完整校验、稳定 tag、`0600` 权限和原子替换。错误必须返回结构化 diagnostics，不允许空输出加成功退出码。
+- sing-box 静态事实源只有 `config/singbox/config.json`。分区编辑由 Go 在配置事务锁内替换指定顶层字段，保留其他字段和数组顺序；客户端使用读取时的 `revision`，同分区冲突返回 `config.conflict`。不能在 Android 中把整份旧快照合并写回。
 - 新增协议或修复解析缺陷时补充不含真实凭据的 fixture/golden 测试。
 
 ## Android 管理器
@@ -82,7 +83,7 @@ src/module/service.sh
 - Navigation3 是导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
 - 主分页底部导航由 `MainBottomBar` 单一实现统一承载；主题偏好不改变其结构或布局形态。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
-- `src/module/NetProxy.apk` 是独立维护的可选模块内置管理器资产。本地 Android 构建和 CI 不得自动覆盖它；标准模块包必须排除该 APK，CI 发布独立的管理器 APK。
+- `src/module/NetProxy.apk` 是独立维护的含管理器包发行资产。本地 Android 构建和普通 CI 不得自动覆盖它；标准包必须排除该 APK。
 
 ## WebUI
 
@@ -157,7 +158,7 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 以下写法看起来不规范，但都是上一版已被证伪写法的替代品。不要以「重构」或「统一风格」为由改回去。
 
 - 分应用策略按 `<user-id>:<package>` 保存并在 Go 中按用户查询 UID——把多个 Android 用户合并成包名或直接把包名交给 sing-box 会在应用分身场景下静默漏配。
-- Service API 与 Clash API 使用 `02_experimental.json`、`08_services.json` 中的固定监听与密钥——改回运行时随机 bootstrap 会让 WebUI 连不上核心且无任何报错。
+- Service API 与 Clash API 使用主配置中 `services`、`experimental.clash_api` 的固定监听与密钥——改回运行时随机 bootstrap 会让 WebUI 连不上核心且无任何报错。
 - Android 依赖由 `AppContainer` 与 `NetProxyViewModelFactory` 手工构造——引入 Hilt/Koin 需先有全项目架构决策。
 - Provider 与 selector 的默认值必须落到 `Auto/<group>`——回退到 `direct` 会让用户以为已代理而实际直连。
 - `src/module/NetProxy.apk` 由独立流程维护——本地 Android 构建覆盖它会把调试包发进正式模块。
@@ -200,7 +201,7 @@ NetProxy 不维护通用独立控制守护进程。唯一长期 Go 进程是模�
 | 模块设置 | `src/module/config/module.conf` | 保存活动分组、选择模式和出站模式 |
 | eBPF 设置 | `src/module/config/ebpf/ebpf.conf` | 由运行时生成 sing-box eBPF inbound |
 | 节点与订阅 | `src/module/data/catalog/<group-id>/` | `meta.json` + `provider.json` |
-| sing-box 静态配置 | `src/module/config/singbox/confdir/` | 按编号组合加载 |
+| sing-box 静态配置 | `src/module/config/singbox/config.json` | 单一主配置，支持整份或按顶层字段编辑 |
 | sing-box 运行时配置 | `src/module/runtime/` | 启动或检查时生成，不由客户端编辑 |
 | 服务状态 | `/dev/netproxy/service.json` | 本次启动周期的状态快照；缺失时按 stopped 处理 |
 | 实时核心状态 | Service API / Clash API | 连接、流量、测速和实际选择 |
@@ -303,13 +304,17 @@ eBPF 只负责透明代理入站。停止服务由 sing-box 关闭并清理其 e
 
 ## sing-box 配置组合
 
-Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，并追加运行时文件：
+Go 生命周期控制器通过 `-c config/singbox/config.json` 加载静态配置，并追加运行时文件：
 
 - `providers.json`：Catalog Local Provider 投影。
 - `outbounds.json`：Auto/Select/Proxy 出站图。
 - `ebpf.json`：由 `ebpf.conf` 生成的透明代理入站。
 
-`confdir` 中的编号文件按职责拆分：日志、实验特性/Clash API、DNS、用户入站、路由、HTTP Client 和 Service API。运行时文件由脚本生成，用户配置编辑器只能修改受管理的静态文档。
+主配置包含日志、实验特性/Clash API、DNS、用户入站、路由、HTTP Client 和 Service API。Android 的分区是 `config list` 返回的逻辑文档，不对应额外磁盘文件；完整编辑入口保留所有受核心支持的字段。运行时文件由 Go 生成并只读展示。
+
+`config read` 返回 `content` 和 `revision`；`config apply/validate --revision <值> <目标> <候选文件>` 检测并发修改。`singbox/dns` 等分区使用带顶层键的 JSON，空对象删除该字段；`singbox/config.json` 替换整份主配置。保存后的 revision 对应本次实际写入内容，不通过无锁重新读取生成。
+
+保留数据安装要求现有 `config/singbox/config.json`，缺失时在停止服务前中止；用户需先备份，再明确选择全新安装。热切换前重新复制最新主配置，不进行格式迁移。默认配置的更新不能自动覆盖用户主配置。
 
 当前控制入口是稳定产品契约：
 
@@ -355,12 +360,12 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 
 ## 构建与发布
 
-- 构建动作先测试并交叉编译 `netproxyctl`，再构建 WebUI，最后打包模块。
-- 标准模块包不包含 `NetProxy.apk`；管理器 APK 由独立构建步骤签名并作为 Release 资产发布，代理能力与模块包保持分离。
-- CI 使用临时自签名证书构建管理器 APK，不覆盖仓库内的 `src/module/NetProxy.apk`；Google Play 仍是推荐更新渠道。
-- 上游代码、资源和依赖通过上游同步或普通提交进入统一构建流程；不再启用额外的定时资源更新发布流程。
-- 本 fork 的 `build-release.yml`、`sync-upstream.yml` 和 `.github/actions/` 来自三次 CI 提交，后续上游同步必须原样保留；同步完成后只构建并发布标准 ZIP 与自签名 APK 两个资产。
-- 上游的资源更新流程可以作为源码参考，但不得替换本 fork 的双资产发布流程或新增工作流。
+- 构建动作一次完成 Go/Shell 验证、`netproxyctl` 与 WebUI 构建，复用已验证的 ARM64 产物打包；开发包发布等待本次模块构建与受影响的 Android 验证通过，不在发布阶段重建。
+- CI 变更范围从同分支上次成功验证的提交计算，不能只比较本次 push：前一轮被取消或失败的改动仍须验证；基线不可用时执行全部检查。
+- 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。KernelSU 源码镜像仍须获取完整对象，不能套用部分克隆。
+- 标准包不包含 `NetProxy.apk`；文件名带 `_with-manager` 的包仅额外携带该 APK，代理能力保持一致。
+- Android 受影响时由 CI 并行执行单元测试与 Lint，但不生成或替换含管理器包的 APK；纯 Android 改动不发布模块开发包。Google Play 是推荐更新渠道，内置 APK 为无 Play 环境保留。
+- `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；高风险或大版本更新进入报告，不自动静默升级。
 
 ## 安全边界
 

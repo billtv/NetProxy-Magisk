@@ -101,6 +101,16 @@ android {
     }
 }
 
+tasks.withType<Test>().configureEach {
+    // Schema 测试直接读取磁盘文件，它们不在 JVM 测试类路径中，必须显式参与缓存键。
+    inputs.file(layout.projectDirectory.file("src/main/assets/sing-box.schema.json"))
+        .withPropertyName("singBoxSchema")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(rootProject.layout.projectDirectory.file("../module/config/singbox/config.json"))
+        .withPropertyName("moduleStaticConfigs")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
