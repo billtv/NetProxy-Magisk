@@ -100,11 +100,13 @@ jobs:
             fi
           fi
 
-          # 即使上游改动没有形成 Git 冲突，也恢复本地 CI 文件，确保构建流程不会被上游覆盖。
+          # 即使上游改动没有形成 Git 冲突，也恢复本地 CI 文件和对应的契约测试，
+          # 确保双资产构建流程不会被上游的旧打包契约覆盖。
           git checkout "$local_sha" -- \
             .github/workflows/build-release.yml \
             .github/workflows/sync-upstream.yml \
-            .github/actions
+            .github/actions \
+            tests/module_packaging_test.sh
 
           # 无论上游是否新增了工作流，最终只保留本仓库定义的两条流程。
           while IFS= read -r workflow; do

@@ -17,7 +17,7 @@ export function classifyChanges(paths) {
 export function lastVerifiedCommit(env, run = execFileSync) {
   try {
     return run('gh', [
-      'api', '--method', 'GET', `repos/${env.GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs`,
+      'api', '--method', 'GET', `repos/${env.GITHUB_REPOSITORY}/actions/workflows/build-release.yml/runs`,
       '-f', `branch=${env.GITHUB_REF_NAME}`, '-f', 'event=push', '-f', 'status=success',
       '-f', 'per_page=1', '--jq', '.workflow_runs[0].head_sha // empty',
     ], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim()

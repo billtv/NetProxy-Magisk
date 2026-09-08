@@ -19,7 +19,7 @@ test('模块、WebUI 和测试变化无需安装 Android 工具链', () => {
 })
 
 test('工作流和公共构建输入变化执行完整验证', () => {
-  for (const path of ['.github/workflows/ci.yml', '.github/actions/build-module/action.yml', '.gitattributes']) {
+  for (const path of ['.github/workflows/build-release.yml', '.github/actions/build-module/action.yml', '.gitattributes']) {
     assert.deepEqual(classifyChanges([path]), { module: true, android: true })
   }
 })
@@ -43,7 +43,7 @@ test('查询同分支上次成功的 push，跳过失败或取消的运行', () 
   const sha = 'a'.repeat(40)
   const base = lastVerifiedCommit({ GITHUB_REPOSITORY: 'owner/repo', GITHUB_REF_NAME: 'main' }, (command, args, options) => {
     assert.equal(command, 'gh')
-    assert.ok(args.includes('repos/owner/repo/actions/workflows/ci.yml/runs'))
+    assert.ok(args.includes('repos/owner/repo/actions/workflows/build-release.yml/runs'))
     for (const query of ['branch=main', 'event=push', 'status=success', 'per_page=1']) {
       assert.ok(args.includes(query))
     }
