@@ -3,7 +3,9 @@ package module
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,18 +88,25 @@ func ExportLogs(options Options, destination string) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(destination), ".diagnostics-")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer os.Remove(file.Name())
 	if err := file.Chmod(0o600); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	archiveErr := writeLogArchive(options, file)
+	if err := errors.Join(archiveErr, file.Close()); err != nil {
 		return err
 	}
-	archive := gzip.NewWriter(file)
-	defer archive.Close()
+	return os.Rename(file.Name(), destination)
+}
+
+func writeLogArchive(options Options, output io.Writer) (err error) {
+	archive := gzip.NewWriter(output)
 	tarWriter := tar.NewWriter(archive)
-	defer tarWriter.Close()
+	defer func() { err = errors.Join(err, tarWriter.Close(), archive.Close()) }()
 	files := make([]archiveFile, 0)
 	for _, kind := range []string{"service", "core"} {
 		path, _ := LogFile(options, kind)

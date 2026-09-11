@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,37 @@ import (
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/fetch"
 )
+
+func TestSubscriptionClosesRequestTransport(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusNotModified} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			closed := make(chan struct{}, 4)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = w.Write([]byte("fixture"))
+				}
+			}))
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateClosed {
+					closed <- struct{}{}
+				}
+			}
+			server.Start()
+			defer server.Close()
+			for range 3 {
+				if _, err := fetch.Subscription(t.Context(), fetch.Request{URL: server.URL}); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-closed:
+				case <-time.After(2 * time.Second):
+					t.Fatal("请求结束后连接仍空闲驻留")
+				}
+			}
+		})
+	}
+}
 
 func TestSubscriptionMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -1,8 +1,10 @@
 package ebpf
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +16,8 @@ import (
 	json "encoding/json/v2"
 
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 const (
@@ -105,8 +109,8 @@ type SharedConfig struct {
 	Interfaces           []string
 	IPv6                 bool
 	BypassPrivateAddress bool
-	IncludeSourceCIDR    []string
-	ExcludeSourceCIDR    []string
+	IncludeSourceCIDR    []netip.Prefix
+	ExcludeSourceCIDR    []netip.Prefix
 	IncludeMACAddress    []string
 	ExcludeMACAddress    []string
 	BypassPort           []uint16
@@ -341,8 +345,11 @@ type BuildResult struct {
 }
 
 // Build 生成 sing-box eBPF inbound 的类型化运行时文档。
-func (c Config) Build() (BuildResult, error) {
-	return c.BuildWithResolver(ResolvePackageUIDs)
+func (c Config) Build(ctx context.Context) (BuildResult, error) {
+	if err := ctx.Err(); err != nil {
+		return BuildResult{}, err
+	}
+	return c.BuildWithResolver(func(refs []PackageRef) (PackageUIDResolution, error) { return ResolvePackageUIDs(ctx, refs) })
 }
 
 // BuildWithResolver 使用指定的包名解析器生成运行时文档，测试可注入确定性解析结果。
@@ -350,24 +357,30 @@ func (c Config) BuildWithResolver(resolve PackageUIDResolver) (BuildResult, erro
 	if err := c.Validate(); err != nil {
 		return BuildResult{}, err
 	}
+	udpTimeout, err := time.ParseDuration(c.UDPTimeout)
+	if err != nil {
+		return BuildResult{}, err
+	}
 	inbound := Inbound{
-		Type:          "ebpf",
-		Tag:           "ebpf-in",
-		Network:       c.Network,
-		UDPTimeout:    c.UDPTimeout,
-		TCPriority:    c.TCPriority,
-		BypassRuleSet: c.BypassRuleSets,
+		Type: "ebpf",
+		Tag:  "ebpf-in",
+		EBPFInboundOptions: option.EBPFInboundOptions{
+			Network:       option.NetworkList(strings.Join(c.Network, "\n")),
+			UDPTimeout:    option.UDPTimeoutCompat(udpTimeout),
+			TCPriority:    option.EBPFTCPriority(c.TCPriority),
+			BypassRuleSet: c.BypassRuleSets,
+		},
 	}
 	missing := make([]PackageRef, 0)
-	inbound.Local = &LocalRuntime{Enabled: c.Local.Enabled}
+	inbound.Local = option.EBPFLocalOptions{Enabled: new(c.Local.Enabled)}
 	if c.Local.Enabled {
-		local := LocalRuntime{
-			Enabled:              true,
+		local := option.EBPFLocalOptions{
+			Enabled:              new(true),
 			DataPlane:            c.Local.DataPlane,
 			CgroupPath:           c.Local.CgroupPath,
 			DNSMode:              c.Local.DNSMode,
-			IPv6:                 c.Local.IPv6,
-			BypassPrivateAddress: c.Local.BypassPrivateAddress,
+			IPv6:                 new(c.Local.IPv6),
+			BypassPrivateAddress: new(c.Local.BypassPrivateAddress),
 			IncludeUID:           append([]uint32{}, c.Local.IncludeUID...),
 			IncludeUIDRange:      append([]string{}, c.Local.IncludeUIDRange...),
 			ExcludeUID:           append([]uint32{}, c.Local.ExcludeUID...),
@@ -402,17 +415,17 @@ func (c Config) BuildWithResolver(resolve PackageUIDResolver) (BuildResult, erro
 		}
 		local.IncludeUID = uniqueUint32(local.IncludeUID)
 		local.ExcludeUID = uniqueUint32(local.ExcludeUID)
-		inbound.Local = &local
+		inbound.Local = local
 	}
-	inbound.Shared = &SharedRuntime{Enabled: c.Shared.Enabled}
+	inbound.Shared = option.EBPFSharedOptions{Enabled: new(c.Shared.Enabled)}
 	if c.Shared.Enabled {
-		inbound.Shared = &SharedRuntime{
-			Enabled:              true,
+		inbound.Shared = option.EBPFSharedOptions{
+			Enabled:              new(true),
 			DataPlane:            c.Shared.DataPlane,
 			DNSMode:              c.Shared.DNSMode,
 			Interface:            c.Shared.Interfaces,
-			IPv6:                 c.Shared.IPv6,
-			BypassPrivateAddress: c.Shared.BypassPrivateAddress,
+			IPv6:                 new(c.Shared.IPv6),
+			BypassPrivateAddress: new(c.Shared.BypassPrivateAddress),
 			IncludeSourceCIDR:    c.Shared.IncludeSourceCIDR,
 			ExcludeSourceCIDR:    c.Shared.ExcludeSourceCIDR,
 			IncludeMACAddress:    c.Shared.IncludeMACAddress,
@@ -432,85 +445,33 @@ type Runtime struct {
 	Inbounds []Inbound `json:"inbounds"`
 }
 
-// Inbound 是新 eBPF 入站的固定字段模型。
 type Inbound struct {
-	Type          string
-	Tag           string
-	Network       []string
-	UDPTimeout    string
-	TCPriority    uint16
-	BypassRuleSet []string
-	Local         *LocalRuntime
-	Shared        *SharedRuntime
+	Type string `json:"type"`
+	Tag  string `json:"tag"`
+	option.EBPFInboundOptions
 }
 
-// LocalRuntime 描述已启用的本机数据路径。
-type LocalRuntime struct {
-	Enabled              bool     `json:"enabled"`
-	DataPlane            string   `json:"data_plane,omitempty"`
-	CgroupPath           string   `json:"cgroup_path,omitempty"`
-	DNSMode              string   `json:"dns_mode,omitempty"`
-	IPv6                 bool     `json:"ipv6"`
-	BypassPrivateAddress bool     `json:"bypass_private_address"`
-	IncludeUID           []uint32 `json:"include_uid,omitempty"`
-	IncludeUIDRange      []string `json:"include_uid_range,omitempty"`
-	ExcludeUID           []uint32 `json:"exclude_uid,omitempty"`
-	ExcludeUIDRange      []string `json:"exclude_uid_range,omitempty"`
-	IncludeAndroidUser   []int    `json:"include_android_user,omitempty"`
-	IncludePackage       []string `json:"include_package,omitempty"`
-	ExcludePackage       []string `json:"exclude_package,omitempty"`
-	BypassPort           []uint16 `json:"bypass_port,omitempty"`
-	BypassPortRange      []string `json:"bypass_port_range,omitempty"`
+// 上游 NetworkList 的内部值用换行分隔；运行时文档必须输出网络名称数组。
+func (runtime Runtime) MarshalJSON() ([]byte, error) {
+	type document Runtime
+	return json.Marshal(document(runtime), json.Deterministic(true), json.WithMarshalers(runtimeMarshalers))
 }
 
-// SharedRuntime 描述已启用的共享网络数据路径。
-type SharedRuntime struct {
-	Enabled              bool     `json:"enabled"`
-	DataPlane            string   `json:"data_plane,omitempty"`
-	DNSMode              string   `json:"dns_mode,omitempty"`
-	Interface            []string `json:"interface,omitempty"`
-	IPv6                 bool     `json:"ipv6"`
-	BypassPrivateAddress bool     `json:"bypass_private_address"`
-	IncludeSourceCIDR    []string `json:"include_source_cidr,omitempty"`
-	ExcludeSourceCIDR    []string `json:"exclude_source_cidr,omitempty"`
-	IncludeMACAddress    []string `json:"include_mac_address,omitempty"`
-	ExcludeMACAddress    []string `json:"exclude_mac_address,omitempty"`
-	BypassPort           []uint16 `json:"bypass_port,omitempty"`
-	BypassPortRange      []string `json:"bypass_port_range,omitempty"`
-}
+var runtimeMarshalers = json.JoinMarshalers(
+	json.MarshalFunc(func(value option.NetworkList) ([]byte, error) { return json.Marshal(value.Build()) }),
+	listMarshaler[string](), listMarshaler[uint32](), listMarshaler[uint16](),
+	listMarshaler[int](), listMarshaler[netip.Prefix](),
+)
 
-// MarshalJSON 只为已启用的数据路径输出设置，避免 disabled 路径携带无效字段。
-func (i Inbound) MarshalJSON() ([]byte, error) {
-	value := map[string]any{
-		"type":            i.Type,
-		"tag":             i.Tag,
-		"udp_timeout":     i.UDPTimeout,
-		"tc_priority":     i.TCPriority,
-		"bypass_rule_set": i.BypassRuleSet,
-	}
-	if len(i.Network) > 0 {
-		value["network"] = i.Network
-	}
-	if i.Local != nil {
-		if i.Local.Enabled {
-			value["local"] = i.Local
-		} else {
-			value["local"] = map[string]bool{"enabled": false}
-		}
-	}
-	if i.Shared != nil {
-		if i.Shared.Enabled {
-			value["shared"] = i.Shared
-		} else {
-			value["shared"] = map[string]bool{"enabled": false}
-		}
-	}
-	return json.Marshal(value, json.Deterministic(true))
+func listMarshaler[T any]() *json.Marshalers {
+	return json.MarshalFunc(func(value badoption.Listable[T]) ([]byte, error) {
+		return json.Marshal([]T(value), json.Deterministic(true))
+	})
 }
 
 // WriteAtomic 校验并原子写入运行时 eBPF 配置。
-func WriteAtomic(path string, config Config) ([]PackageRef, error) {
-	built, err := config.Build()
+func WriteAtomic(ctx context.Context, path string, config Config) ([]PackageRef, error) {
+	built, err := config.Build(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -722,14 +683,17 @@ func validatePackageName(value string) error {
 	return nil
 }
 
-func parseCIDRs(value, field string) ([]string, error) {
+func parseCIDRs(value, field string) ([]netip.Prefix, error) {
 	items := CommaSeparated(value)
+	result := make([]netip.Prefix, 0, len(items))
 	for _, item := range items {
-		if _, _, err := net.ParseCIDR(item); err != nil {
+		prefix, err := netip.ParsePrefix(item)
+		if err != nil {
 			return nil, validationError("ebpf.cidr_invalid", field, field+" 格式无效: "+item)
 		}
+		result = append(result, prefix)
 	}
-	return items, nil
+	return result, nil
 }
 
 func parseMACs(value, field string) ([]string, error) {

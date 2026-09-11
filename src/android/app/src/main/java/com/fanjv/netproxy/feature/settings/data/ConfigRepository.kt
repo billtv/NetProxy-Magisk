@@ -42,7 +42,8 @@ internal class ConfigRepository(
 
     suspend fun updateValues(target: String, updates: List<ConfigValueUpdate>) =
         updateMutex.withLock {
-            val content = updates.fold(read(target)) { current, update ->
+            val snapshot = readSnapshot(target)
+            val content = updates.fold(snapshot.content) { current, update ->
                 ShellConfigFile.updateValue(
                     current,
                     update.key,
@@ -50,7 +51,7 @@ internal class ConfigRepository(
                     update.forceQuotes
                 )
             }
-            apply(target, content)
+            apply(target, content, snapshot.revision)
         }
 
     suspend fun apply(target: String, content: String, revision: String? = null): String =

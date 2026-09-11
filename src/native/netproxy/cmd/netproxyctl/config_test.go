@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 )
 
 func TestConfigApplyReturnsStructuredConflict(t *testing.T) {
@@ -21,8 +23,11 @@ func TestConfigApplyReturnsStructuredConflict(t *testing.T) {
 	if err := os.WriteFile(source, []byte(`{"dns":{"final":"new"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := runModuleConfig(context.Background(), []string{
-		"apply", "--module-dir", root, "--state-file", filepath.Join(root, "state", "service.json"),
+	options := moduleapp.NewOptions(root)
+	options.StateFile = filepath.Join(root, "state", "service.json")
+	command := &cli{options: options}
+	err := command.config(context.Background(), []string{
+		"apply",
 		"--revision", "stale", "singbox/dns", source,
 	})
 	structured, ok := errors.AsType[*resultError](err)

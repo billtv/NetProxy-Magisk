@@ -285,29 +285,42 @@ func getNetworkStateWith(
 	command networkCommandFunc,
 	readActiveInterface activeNetworkReader,
 ) (NetworkState, error) {
-	status, statusErr := command(ctx, "cmd", "wifi", "status")
-	dumpsys, dumpsysErr := command(ctx, "dumpsys", "wifi")
-	if statusErr != nil && dumpsysErr != nil {
-		return NetworkState{}, fmt.Errorf("cmd wifi status: %v; dumpsys wifi: %v", statusErr, dumpsysErr)
-	}
-	parts := make([]string, 0, 2)
-	if statusErr == nil {
-		parts = append(parts, status)
-	}
-	if dumpsysErr == nil {
-		parts = append(parts, dumpsys)
-	}
-	combined := strings.Join(parts, "\n")
-	networkType, ssid := parseWiFiSnapshot(combined)
-
 	activeInterface, err := readActiveInterface(ctx)
 	if err != nil {
 		return NetworkState{}, err
 	}
-	if networkType == "wifi" && !isWiFiInterface(activeInterface) {
-		// Android 仍可能报告 Wi-Fi 已连接，但 policy routing 已将真实出口切到蜂窝网络。
-		networkType = "not_wifi"
-		ssid = ""
+	if err := ctx.Err(); err != nil {
+		return NetworkState{}, err
+	}
+	if !isWiFiInterface(activeInterface) {
+		return NetworkState{NetworkType: "not_wifi", ActiveInterface: activeInterface}, nil
+	}
+	status, statusErr := command(ctx, "cmd", "wifi", "status")
+	if err := ctx.Err(); err != nil {
+		return NetworkState{}, err
+	}
+	networkType, ssid := parseWiFiSnapshot(status)
+	if statusErr != nil || networkType != "wifi" || ssid == "" {
+		dumpsys, dumpsysErr := command(ctx, "dumpsys", "wifi")
+		if err := ctx.Err(); err != nil {
+			return NetworkState{}, err
+		}
+		if statusErr != nil && dumpsysErr != nil {
+			return NetworkState{}, fmt.Errorf("cmd wifi status: %v; dumpsys wifi: %w", statusErr, dumpsysErr)
+		}
+		if statusErr != nil {
+			status = ""
+		}
+		if dumpsysErr != nil {
+			dumpsys = ""
+		}
+		networkType, ssid = parseWiFiSnapshot(status + "\n" + dumpsys)
+	}
+	if err := ctx.Err(); err != nil {
+		return NetworkState{}, err
+	}
+	if networkType == "wifi" && ssid == "" {
+		return NetworkState{}, errors.New("Wi-Fi 已连接但无法确认 SSID")
 	}
 
 	return NetworkState{

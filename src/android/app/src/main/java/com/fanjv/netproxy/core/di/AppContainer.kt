@@ -19,7 +19,7 @@ import com.fanjv.netproxy.feature.theme.presentation.ThemeManager
 internal class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     private val netProxyCtlClient = NetProxyCtlClient()
-    private val commandFileStore = CommandFileStore(appContext)
+    private val commandFileStore = CommandFileStore(appContext.cacheDir)
 
     val serviceRepository = ServiceRepository(netProxyCtlClient)
     private val catalogRepository = CatalogRepository(netProxyCtlClient, commandFileStore)

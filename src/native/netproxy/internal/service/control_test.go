@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +29,7 @@ func writeCatalogFixture(t *testing.T, root string) {
 	}
 	metadata := catalog.NewMetadata("default", "本地配置", "local", "", time.Now())
 	metadata.NodeCount = 1
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	providerJSON := []byte(`{"outbounds":[{"type":"socks","tag":"NODE","server":"example.com","server_port":1080}]}`)
@@ -70,6 +71,31 @@ func TestReadStatusWithoutService(t *testing.T) {
 	}
 	if !bytes.Contains(encoded, []byte(`"worker_state"`)) || !bytes.Contains(encoded, []byte(`"worker_pid"`)) {
 		t.Fatalf("status 缺少后台 Worker 字段: %s", encoded)
+	}
+}
+
+func TestReadStatusPropagatesCatalogLockDeadline(t *testing.T) {
+	temp := t.TempDir()
+	moduleConfig := filepath.Join(temp, "module.conf")
+	if err := os.WriteFile(moduleConfig, []byte("ACTIVE_GROUP_ID=default\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(temp, "catalog")
+	release, err := catalog.AcquireRoot(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	_, err = ReadStatus(ctx, Options{
+		CatalogRoot: root, ModuleConfig: moduleConfig,
+		StateFile:     filepath.Join(temp, "service.json"),
+		ProgressDir:   filepath.Join(temp, "subscriptions"),
+		WorkerPIDFile: filepath.Join(temp, "worker.pid"),
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("等锁超时不能转换成成功的服务状态: %v", err)
 	}
 }
 

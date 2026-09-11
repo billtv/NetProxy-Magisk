@@ -1,6 +1,8 @@
 package config
 
 import (
+	"context"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/processlock"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +14,7 @@ func TestConfigLockHelper(t *testing.T) {
 	if os.Getenv("NETPROXY_CONFIG_LOCK_HELPER") != "1" {
 		return
 	}
-	lock, err := acquireLock(os.Getenv("NETPROXY_CONFIG_LOCK_PATH"))
+	lock, err := processlock.Acquire(context.Background(), os.Getenv("NETPROXY_CONFIG_LOCK_PATH"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +85,7 @@ func TestUpdateModuleKeepsOriginalWhenCandidateIsInvalid(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateModule(path, map[string]string{"OUTBOUND_MODE": "invalid"}); err == nil {
+	if err := UpdateModule(context.Background(), path, map[string]string{"OUTBOUND_MODE": "invalid"}); err == nil {
 		t.Fatal("expected typed update to fail")
 	}
 	content, err := os.ReadFile(path)
@@ -135,7 +137,7 @@ func TestConfigLockRecoversAfterHolderExit(t *testing.T) {
 	}
 	waited = true
 
-	lock, err := acquireLock(lockPath)
+	lock, err := processlock.Acquire(context.Background(), lockPath)
 	if err != nil {
 		t.Fatalf("持锁进程退出后配置锁未恢复: %v", err)
 	}

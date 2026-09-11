@@ -62,7 +62,7 @@ func InitializeGroup(ctx context.Context, options GroupOptions) error {
 	if err := validateGroupOptions(options); err != nil {
 		return err
 	}
-	release, err := acquireCatalogMutation(options.Root, options.GroupID)
+	release, err := acquireCatalogMutation(ctx, options.Root, options.GroupID)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func EnsureGroup(ctx context.Context, options GroupOptions) error {
 	if err := validateGroupOptions(options); err != nil {
 		return err
 	}
-	release, err := acquireCatalogMutation(options.Root, options.GroupID)
+	release, err := acquireCatalogMutation(ctx, options.Root, options.GroupID)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func SetGroupName(ctx context.Context, root, groupID, name string, now time.Time
 	if !isValidGroupID(groupID) {
 		return fmt.Errorf("非法分组 ID: %s", groupID)
 	}
-	release, err := acquireCatalogMutation(root, groupID)
+	release, err := acquireCatalogMutation(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func AppendNode(ctx context.Context, options MutationOptions) (MutationResult, e
 	if err := validateMutationOptions(options, false); err != nil {
 		return MutationResult{}, err
 	}
-	release, err := acquireCatalogMutation(filepath.Dir(options.GroupDir), options.GroupID)
+	release, err := acquireCatalogMutation(ctx, filepath.Dir(options.GroupDir), options.GroupID)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -244,7 +244,7 @@ func RemoveNode(ctx context.Context, options MutationOptions) (MutationResult, e
 	if err := validateMutationOptions(options, true); err != nil {
 		return MutationResult{}, err
 	}
-	release, err := acquireCatalogMutation(filepath.Dir(options.GroupDir), options.GroupID)
+	release, err := acquireCatalogMutation(ctx, filepath.Dir(options.GroupDir), options.GroupID)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -272,7 +272,7 @@ func EditNode(ctx context.Context, options MutationOptions) (MutationResult, err
 	if err := validateMutationOptions(options, true); err != nil {
 		return MutationResult{}, err
 	}
-	release, err := acquireCatalogMutation(filepath.Dir(options.GroupDir), options.GroupID)
+	release, err := acquireCatalogMutation(ctx, filepath.Dir(options.GroupDir), options.GroupID)
 	if err != nil {
 		return MutationResult{}, err
 	}

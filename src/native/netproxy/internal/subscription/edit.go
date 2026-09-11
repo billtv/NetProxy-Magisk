@@ -62,11 +62,11 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 	if options.Now.IsZero() {
 		options.Now = time.Now()
 	}
-	releaseGroup, err := catalog.Acquire(options.Root, options.GroupID)
+	releaseGroup, err := catalog.Acquire(ctx, options.Root, options.GroupID)
 	if err != nil {
 		return EditResult{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
 	}
-	releaseRoot, err := catalog.AcquireRoot(options.Root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		releaseGroup()
 		return EditResult{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
@@ -239,7 +239,7 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 			return mergeEditResult(EditResult{GroupID: options.GroupID, NameChanged: nameChanged, RequiresUpdate: requiresUpdate}, updated), err
 		}
 		editBeforeRestoreHook()
-		restoreErr := restoreMetadataIfUnchanged(options.Root, options.GroupID, metaPath, oldMetadata, metadata)
+		restoreErr := restoreMetadataIfUnchanged(ctx, options.Root, options.GroupID, metaPath, oldMetadata, metadata)
 		return EditResult{}, errors.Join(err, restoreErr)
 	}
 	return mergeEditResult(EditResult{GroupID: options.GroupID, NameChanged: nameChanged, RequiresUpdate: true}, updated), nil
@@ -257,13 +257,15 @@ func mergeEditResult(edit EditResult, update Result) EditResult {
 	return edit
 }
 
-func restoreMetadataIfUnchanged(root, groupID, metaPath string, oldMetadata, expected catalog.Metadata) error {
-	releaseGroup, err := catalog.Acquire(root, groupID)
+func restoreMetadataIfUnchanged(ctx context.Context, root, groupID, metaPath string, oldMetadata, expected catalog.Metadata) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	releaseGroup, err := catalog.Acquire(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
 	defer releaseGroup()
-	releaseRoot, err := catalog.AcquireRoot(root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, root)
 	if err != nil {
 		return err
 	}

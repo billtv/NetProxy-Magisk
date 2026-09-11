@@ -3,6 +3,7 @@ package module
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,49 @@ import (
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 )
+
+type limitedArchiveWriter struct {
+	remaining int
+	failure   error
+}
+
+func (writer *limitedArchiveWriter) Write(content []byte) (int, error) {
+	if len(content) > writer.remaining {
+		return 0, writer.failure
+	}
+	writer.remaining -= len(content)
+	return len(content), nil
+}
+
+func TestExportLogsReportsArchiveFinalizationFailure(t *testing.T) {
+	options := NewOptions(t.TempDir())
+	failure := errors.New("模拟压缩尾部写入失败")
+	if err := writeLogArchive(options, &limitedArchiveWriter{remaining: 10, failure: failure}); !errors.Is(err, failure) {
+		t.Fatalf("压缩结束错误丢失: %v", err)
+	}
+}
+
+func TestFailedLogExportPreservesDestination(t *testing.T) {
+	options := NewOptions(t.TempDir())
+	if err := os.MkdirAll(options.ModuleConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(options.ModuleDir, "diagnostic.tar.gz")
+	if err := os.WriteFile(destination, []byte("previous export"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ExportLogs(options, destination); err == nil {
+		t.Fatal("错误日志源未导致导出失败")
+	}
+	content, err := os.ReadFile(destination)
+	if err != nil || string(content) != "previous export" {
+		t.Fatalf("已有导出被破坏: %q %v", content, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(options.ModuleDir, ".diagnostics-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("导出临时文件未清理: %v %v", matches, err)
+	}
+}
 
 func TestExportLogsIncludesRuntimeConfigAndRedactsSecrets(t *testing.T) {
 	root := t.TempDir()

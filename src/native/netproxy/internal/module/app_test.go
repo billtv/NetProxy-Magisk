@@ -48,7 +48,7 @@ func TestNodeImportAppendsToDefaultGroup(t *testing.T) {
 	if result.GroupID != "default" || result.NodeCount != 3 || result.Revision != 2 {
 		t.Fatalf("unexpected import result: %+v", result)
 	}
-	ids, err := catalog.GroupIDs(options.CatalogRoot, "all")
+	ids, err := catalog.GroupIDs(context.Background(), options.CatalogRoot, "all")
 	if err != nil {
 		t.Fatalf("list catalog groups: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestNodeImportAppendsToDefaultGroup(t *testing.T) {
 	if got := len(provider.Inspect(document)); got != 3 {
 		t.Fatalf("default node count = %d, want 3", got)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(options.CatalogRoot, "default", "meta.json"), "default")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(options.CatalogRoot, "default", "meta.json"), "default")
 	if err != nil {
 		t.Fatalf("load default metadata: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestEditSubscriptionFailureReportsPersistedSettings(t *testing.T) {
 	if !ok || data["persisted"] != true {
 		t.Fatalf("structured error lost persisted=true: %#v", subscriptionErr.Data)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(options.CatalogRoot, "edit-failure", "meta.json"), "edit-failure")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(options.CatalogRoot, "edit-failure", "meta.json"), "edit-failure")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestAddSubscriptionCancellationReportsPersistedGroup(t *testing.T) {
 	if !ok || data["persisted"] != true {
 		t.Fatalf("cancelled add lost persisted=true: %#v", subscriptionErr.Data)
 	}
-	groups, err := catalog.GroupIDs(options.CatalogRoot, "subscription")
+	groups, err := catalog.GroupIDs(context.Background(), options.CatalogRoot, "subscription")
 	if err != nil || len(groups) != 1 {
 		t.Fatalf("persisted subscription group = %v, err=%v", groups, err)
 	}
@@ -229,7 +229,7 @@ func TestEditSubscriptionSchedulingOnlyDoesNotReload(t *testing.T) {
 	if !result.Persisted || result.RequiresUpdate || result.RuntimeSyncState != subscription.RuntimeSyncNotRunning {
 		t.Fatalf("调度字段编辑结果异常: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(options.CatalogRoot, "schedule-only", "meta.json"), "schedule-only")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(options.CatalogRoot, "schedule-only", "meta.json"), "schedule-only")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestEditSubscriptionHistoryFailureKeepsProviderAndMetadata(t *testing.T) {
 	if !result.Persisted {
 		t.Fatalf("历史写入失败不应伪装成未保存: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(options.CatalogRoot, "history-edit", "meta.json"), "history-edit")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(options.CatalogRoot, "history-edit", "meta.json"), "history-edit")
 	if err != nil {
 		t.Fatal(err)
 	}

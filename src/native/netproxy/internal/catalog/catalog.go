@@ -101,7 +101,7 @@ type ScheduleResult struct {
 }
 
 func Scan(ctx context.Context, options ScanOptions) ([]GroupSnapshot, error) {
-	release, err := acquireCatalogRootAndRecover(options.Root)
+	release, err := acquireCatalogRootAndRecover(ctx, options.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +136,8 @@ func Scan(ctx context.Context, options ScanOptions) ([]GroupSnapshot, error) {
 	return result, nil
 }
 
-func Schedule(root string, now int64) (ScheduleResult, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+func Schedule(ctx context.Context, root string, now int64) (ScheduleResult, error) {
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return ScheduleResult{}, err
 	}
@@ -172,11 +172,11 @@ func Schedule(root string, now int64) (ScheduleResult, error) {
 	return result, nil
 }
 
-func RuntimeTag(root, groupID string) (string, error) {
+func RuntimeTag(ctx context.Context, root, groupID string) (string, error) {
 	if !isValidGroupID(groupID) {
 		return "", fmt.Errorf("非法分组 ID: %s", groupID)
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return "", err
 	}
@@ -222,8 +222,8 @@ func RuntimeTag(root, groupID string) (string, error) {
 	return targetName, nil
 }
 
-func GroupIDs(root, groupType string) ([]string, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+func GroupIDs(ctx context.Context, root, groupType string) ([]string, error) {
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -249,11 +249,11 @@ func GroupIDs(root, groupType string) ([]string, error) {
 }
 
 // NewSubscriptionGroupID 为新订阅生成不冲突的稳定 ID。
-func NewSubscriptionGroupID(root string) (string, error) {
+func NewSubscriptionGroupID(ctx context.Context, root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("Catalog 根目录不能为空")
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return "", err
 	}
@@ -275,7 +275,7 @@ func BuildRuntime(ctx context.Context, options RuntimeOptions) (RuntimeResult, e
 	if options.Root == "" || options.ProvidersOutput == "" || options.OutboundsOutput == "" {
 		return RuntimeResult{}, errors.New("Catalog 根目录和运行时输出路径不能为空")
 	}
-	release, err := acquireCatalogRootAndRecover(options.Root)
+	release, err := acquireCatalogRootAndRecover(ctx, options.Root)
 	if err != nil {
 		return RuntimeResult{}, err
 	}

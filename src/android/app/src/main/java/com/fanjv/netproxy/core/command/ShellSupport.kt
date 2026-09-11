@@ -39,6 +39,13 @@ internal data class TimedShellResult(
 
 /** 纯内存解析和更新 KEY=value 配置，实际读写由 netproxyctl 事务完成。 */
 internal object ShellConfigFile {
+    fun boolean(value: String?, default: Boolean = false): Boolean = when (value) {
+        "1", "true" -> true
+        "0", "false" -> false
+        null -> default
+        else -> error("布尔配置无效: $value")
+    }
+
     fun parse(content: String): Map<String, String> = buildMap {
         content.lineSequence().forEach { rawLine ->
             val line = rawLine.trim()

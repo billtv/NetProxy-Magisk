@@ -179,7 +179,7 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 		if failure {
 			nearest = now.Unix() + int64(retryDelay/time.Second)
 		} else {
-			nearest, err = nextUpdate(options.Root, now.Unix())
+			nearest, err = nextUpdate(ctx, options.Root, now.Unix())
 			if err != nil {
 				logWorker(logger, "ERROR", "subscription.schedule", "failed", "计算下一次订阅更新时间失败: %v", err)
 				consecutiveFailures++
@@ -295,7 +295,7 @@ func RunDue(ctx context.Context, options Options, now time.Time, logger *log.Log
 	if now.IsZero() {
 		now = time.Now()
 	}
-	schedule, err := catalog.Schedule(options.Root, now.Unix())
+	schedule, err := catalog.Schedule(ctx, options.Root, now.Unix())
 	if err != nil {
 		return Summary{}, err
 	}
@@ -431,7 +431,7 @@ func UpdateGroup(ctx context.Context, options Options, groupID string, now time.
 // SyncEditedGroup 将已持久化的订阅编辑通过统一运行时流程应用到 sing-box。
 func SyncEditedGroup(ctx context.Context, options Options, groupID string, now time.Time, logger *log.Logger) (subscription.Result, error) {
 	result := subscription.Result{GroupID: groupID, Persisted: true}
-	metadata, err := catalog.LoadMetadata(filepath.Join(options.Root, groupID, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(ctx, filepath.Join(options.Root, groupID, "meta.json"), groupID)
 	if err != nil {
 		return result, persistedEffectFailure(result, err)
 	}
@@ -489,15 +489,15 @@ func applyRuntimeSync(ctx context.Context, options Options, result subscription.
 }
 
 // NextUpdate 返回下一次自动更新时间；没有自动订阅时返回 0。
-func NextUpdate(root string, now time.Time) (int64, error) {
+func NextUpdate(ctx context.Context, root string, now time.Time) (int64, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	return nextUpdate(root, now.Unix())
+	return nextUpdate(ctx, root, now.Unix())
 }
 
-func nextUpdate(root string, now int64) (int64, error) {
-	schedule, err := catalog.Schedule(root, now)
+func nextUpdate(ctx context.Context, root string, now int64) (int64, error) {
+	schedule, err := catalog.Schedule(ctx, root, now)
 	if err != nil {
 		return 0, err
 	}
@@ -568,7 +568,7 @@ func persistedEffectFailure(result subscription.Result, cause error) error {
 }
 
 func verifyRuntimeState(ctx context.Context, options Options, groupID string) error {
-	runtimeTag, err := catalog.RuntimeTag(options.Root, groupID)
+	runtimeTag, err := catalog.RuntimeTag(ctx, options.Root, groupID)
 	if err != nil {
 		return err
 	}
@@ -649,7 +649,7 @@ func activateGroupIfNeeded(ctx context.Context, options Options, groupID string)
 	if err != nil || !hasNodes {
 		return false, err
 	}
-	if err := workerUpdateModule(options.ModuleConf, map[string]string{
+	if err := workerUpdateModule(ctx, options.ModuleConf, map[string]string{
 		"ACTIVE_GROUP_ID":   moduleconfig.Quote(groupID),
 		"SELECTOR_MODE":     "urltest",
 		"SELECTED_NODE_REF": moduleconfig.Quote(""),
@@ -676,13 +676,13 @@ func fallbackMissingNode(ctx context.Context, options Options, groupID string, l
 	if err != nil || present {
 		return err
 	}
-	if err := workerUpdateModule(options.ModuleConf, map[string]string{
+	if err := workerUpdateModule(ctx, options.ModuleConf, map[string]string{
 		"SELECTOR_MODE":     "urltest",
 		"SELECTED_NODE_REF": moduleconfig.Quote(""),
 	}); err != nil {
 		return err
 	}
-	runtimeTag, err := catalog.RuntimeTag(options.Root, groupID)
+	runtimeTag, err := catalog.RuntimeTag(ctx, options.Root, groupID)
 	if err != nil {
 		return err
 	}
@@ -767,7 +767,7 @@ func readPID(path string) int {
 }
 
 // ReadStatus 返回 Worker 当前状态，不会启动 Worker。
-func ReadStatus(options Options) (Status, error) {
+func ReadStatus(ctx context.Context, options Options) (Status, error) {
 	if err := validateOptions(options); err != nil {
 		return Status{}, err
 	}
@@ -775,7 +775,7 @@ func ReadStatus(options Options) (Status, error) {
 	if pid <= 0 || !workerProcessPID(pid) {
 		return Status{State: "stopped"}, nil
 	}
-	nearest, err := NextUpdate(options.Root, options.Now())
+	nearest, err := NextUpdate(ctx, options.Root, options.Now())
 	if err != nil {
 		return Status{}, err
 	}

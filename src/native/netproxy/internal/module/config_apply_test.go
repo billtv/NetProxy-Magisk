@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var fakeSingBoxBuild struct {
@@ -351,8 +354,8 @@ func TestApplyConfigCommitFailureReportsRollbackErrors(t *testing.T) {
 		return nil
 	}
 	configRestoreReload = func(_ context.Context, _ Options, _ configApplyJournal) error {
-		assertRuntimeContent(t, options, runtimeContent)
-		return errors.New("模拟旧 runtime reload 失败")
+		t.Fatal("磁盘恢复失败时不能 reload 半恢复配置")
+		return nil
 	}
 	failCommittedJournalWrite(t)
 	withFakeSingBoxResult(t, false, func() {
@@ -361,7 +364,7 @@ func TestApplyConfigCommitFailureReportsRollbackErrors(t *testing.T) {
 			t.Fatal("commit rollback failure was accepted")
 		}
 		message := err.Error()
-		for _, expected := range []string{"提交配置事务失败", "磁盘恢复失败", "旧 runtime reload 失败"} {
+		for _, expected := range []string{"提交配置事务失败", "磁盘恢复失败"} {
 			if !strings.Contains(message, expected) {
 				t.Fatalf("compound error missing %q: %v", expected, err)
 			}
@@ -375,6 +378,28 @@ func TestApplyConfigCommitFailureReportsRollbackErrors(t *testing.T) {
 		t.Fatalf("static config was not restored after compound rollback failure: %q", content)
 	}
 	assertRuntimeContent(t, options, runtimeContent)
+	if _, err := os.Stat(filepath.Join(configTransactionPath(options), "journal.json")); err != nil {
+		t.Fatalf("失败后必须保留恢复 journal: %v", err)
+	}
+}
+
+func TestApplyConfigReturnsRevisionAfterSelectionNormalization(t *testing.T) {
+	options, _, source, _ := configApplyOptions(t)
+	isolateConfigApplyHooks(t, true)
+	if err := os.WriteFile(source, []byte("ACTIVE_GROUP_ID=missing\nSELECTOR_MODE=urltest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configReload = func(ctx context.Context, locked Options) error {
+		return locked.updateModule(ctx, map[string]string{"ACTIVE_GROUP_ID": "default"})
+	}
+	revision, err := ApplyConfig(t.Context(), options, "module", source, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(options.ModuleConfig)
+	if err != nil || revision != configRevision(content) {
+		t.Fatalf("返回的 revision 与最终配置不同: %s / %s, %v", revision, configRevision(content), err)
+	}
 }
 
 func TestRecoverConfigApplyBeforeAndAfterRename(t *testing.T) {
@@ -409,6 +434,153 @@ func TestRecoverConfigApplyBeforeAndAfterRename(t *testing.T) {
 				t.Fatalf("transaction remains after %s recovery: %v", phase, err)
 			}
 		})
+	}
+}
+
+func TestRecoverConfigApplyAfterRollbackCleanupWasInterrupted(t *testing.T) {
+	options, destination, _, content := configApplyOptions(t)
+	isolateConfigApplyHooks(t, false)
+	transaction, err := beginConfigApply(options, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.setPhase("rolled_back"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(transaction.journal.Static[0].Backup); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := recoverConfigApply(t.Context(), options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertRuntimeContent(t, options, content)
+	if _, err := os.Stat(destination); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigRollbackFailureKeepsSnapshotsForRetry(t *testing.T) {
+	options, destination, _, runtimeContent := configApplyOptions(t)
+	isolateConfigApplyHooks(t, false)
+	transaction, err := beginConfigApply(options, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("模拟恢复中断")
+	configSnapshotRestore = func(snapshot configFileSnapshot) error {
+		if filepath.Base(snapshot.Path) == "ebpf.json" {
+			return failure
+		}
+		return restoreConfigSnapshot(snapshot)
+	}
+	for range 2 {
+		if err := transaction.rollback(); !errors.Is(err, failure) {
+			t.Fatalf("恢复错误丢失: %v", err)
+		}
+		if _, err := os.Stat(transaction.journalPath); err != nil {
+			t.Fatal(err)
+		}
+		for _, snapshot := range transaction.journal.Static {
+			if snapshot.Exists {
+				if _, err := os.Stat(snapshot.Backup); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	configSnapshotRestore = restoreConfigSnapshot
+	if err := recoverConfigApply(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimeContent(t, options, runtimeContent)
+	if _, err := os.Stat(transaction.directory); !os.IsNotExist(err) {
+		t.Fatalf("恢复后未清理: %v", err)
+	}
+}
+
+func TestConfigApplyHoldsWriterLockAndReloadBorrowsIt(t *testing.T) {
+	options, _, source, _ := configApplyOptions(t)
+	isolateConfigApplyHooks(t, true)
+	configReload = func(ctx context.Context, locked Options) error {
+		waitContext, cancel := context.WithTimeout(ctx, 40*time.Millisecond)
+		defer cancel()
+		if editor, err := moduleconfig.Lock(waitContext, options.ModuleConfig); !errors.Is(err, context.DeadlineExceeded) {
+			if editor != nil {
+				editor.Release()
+			}
+			return fmt.Errorf("reload 期间其他写入未被阻止: %v", err)
+		}
+		return locked.updateModule(context.Background(), map[string]string{"OUTBOUND_MODE": "global"})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	withFakeSingBoxResult(t, false, func() {
+		if _, err := ApplyConfig(ctx, options, "singbox/config.json", source, false, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := moduleconfig.UpdateModule(context.Background(), options.ModuleConfig, map[string]string{"AUTO_START": "0"}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := moduleconfig.LoadModule(options.ModuleConfig)
+	if err != nil || config.OutboundMode != "global" || config.AutoStart {
+		t.Fatalf("配置变更丢失: %+v %v", config, err)
+	}
+}
+
+func TestConcurrentAppAddsKeepEveryPackage(t *testing.T) {
+	options, _, _, _ := configApplyOptions(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const count = 16
+	start := make(chan struct{})
+	results := make(chan error, count)
+	for index := range count {
+		go func() {
+			<-start
+			_, err := UpdateApp(ctx, options, "add", fmt.Sprintf("0:com.example.app%d", index))
+			results <- err
+		}()
+	}
+	close(start)
+	for range count {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy, err := LoadAppPolicy(options.EBPFConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.Split(policy.BypassApps, ",")) != count {
+		t.Fatalf("并发写入丢失名单: %s", policy.BypassApps)
+	}
+}
+
+func TestConfigApplyRejectsRevisionAfterInternalWrite(t *testing.T) {
+	options, _, source, _ := configApplyOptions(t)
+	isolateConfigApplyHooks(t, false)
+	original, err := os.ReadFile(options.ModuleConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("AUTO_START=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := moduleconfig.UpdateModule(context.Background(), options.ModuleConfig, map[string]string{"OUTBOUND_MODE": "global"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyConfig(context.Background(), options, "module", source, false, configRevision(original)); err == nil {
+		t.Fatal("过期配置覆盖成功")
+	}
+	config, err := moduleconfig.LoadModule(options.ModuleConfig)
+	if err != nil || config.OutboundMode != "global" {
+		t.Fatalf("内部写入丢失: %+v %v", config, err)
 	}
 }
 

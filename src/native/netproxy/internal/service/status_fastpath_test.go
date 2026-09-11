@@ -29,7 +29,7 @@ func writeStatusGroup(t *testing.T, root, groupID, name string, nodeCount int, p
 	}
 	metadata := catalog.NewMetadata(groupID, name, "local", "", time.Now())
 	metadata.NodeCount = nodeCount
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), providerContent, 0o600); err != nil {

@@ -177,7 +177,7 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 		}
 	}
 
-	if worker, err := readWorkerStatus(options); err == nil {
+	if worker, err := readWorkerStatus(ctx, options); err == nil {
 		status.WorkerState = worker.State
 		if worker.State == "running" && worker.PID > 0 {
 			pid := worker.PID
@@ -191,7 +191,7 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 		// 服务未运行时没有核心实时模式，展示持久化配置作为下一次启动模式。
 		status.OutboundMode = status.ConfiguredOutboundMode
 	}
-	return status, nil
+	return status, ctx.Err()
 }
 
 // ReadGroups 读取 Service API 当前的节点组和测速状态。
@@ -217,7 +217,7 @@ func readNodes(ctx context.Context, options Options, module moduleconfig.ModuleC
 		return nil, errors.New("Catalog 根目录不能为空")
 	}
 	if strings.TrimSpace(groupID) != "" {
-		resolved, err := catalog.ResolveGroup(options.CatalogRoot, groupID)
+		resolved, err := catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 		if err != nil {
 			return nil, err
 		}
@@ -803,7 +803,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 		if err != nil {
 			return delayRequest{}, err
 		}
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, resolvedGroup)
+		runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, resolvedGroup)
 		if err != nil {
 			return delayRequest{}, err
 		}
@@ -817,7 +817,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 		if err != nil {
 			return delayRequest{}, err
 		}
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, resolvedGroup)
+		runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, resolvedGroup)
 		if err != nil {
 			return delayRequest{}, err
 		}
@@ -827,7 +827,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 }
 
 func resolveDelayGroup(ctx context.Context, options Options, query string) (string, error) {
-	resolved, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	resolved, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err == nil {
 		return resolved, nil
 	}
@@ -850,7 +850,7 @@ func runtimeNodeDelayRequest(ctx context.Context, root, reference string) (delay
 	if !found || groupID == "" || tag == "" {
 		return delayRequest{}, errors.New("节点引用格式应为 <group-id>/<tag>")
 	}
-	runtimeTag, err := catalog.RuntimeTag(root, groupID)
+	runtimeTag, err := catalog.RuntimeTag(ctx, root, groupID)
 	if err != nil {
 		return delayRequest{}, err
 	}
@@ -864,12 +864,12 @@ func runtimeNodeDelayRequest(ctx context.Context, root, reference string) (delay
 	return delayRequest{Target: runtimeTag + "/" + tag, GroupID: groupID, NodeTag: tag}, nil
 }
 
-func readWorkerStatus(options Options) (worker.Status, error) {
+func readWorkerStatus(ctx context.Context, options Options) (worker.Status, error) {
 	workerOptions := worker.NewOptions(options.CatalogRoot)
 	workerOptions.ProgressDir = options.ProgressDir
 	workerOptions.PIDFile = options.WorkerPIDFile
 	workerOptions.ModuleConf = options.ModuleConfig
-	return worker.ReadStatus(workerOptions)
+	return worker.ReadStatus(ctx, workerOptions)
 }
 
 // FindProcess 返回与指定可执行文件匹配的进程；statePID 可减少 /proc 扫描。

@@ -232,6 +232,12 @@ func ApplyConfig(ctx context.Context, options Options, target, source string, va
 		if err := recoverConfigApply(ctx, options); err != nil {
 			return "", err
 		}
+		var release func()
+		options, release, err = lockConfigFiles(ctx, options, destination, options.ModuleConfig)
+		if err != nil {
+			return "", err
+		}
+		defer release()
 	}
 	// 锁内读取最新主配置后只替换目标分区，不能把客户端的整份旧快照写回。
 	section := configSection(target)
@@ -274,47 +280,42 @@ func ApplyConfig(ctx context.Context, options Options, target, source string, va
 		return "", err
 	}
 	if err := os.Rename(candidatePath, destination); err != nil {
-		_ = transaction.rollback()
-		return "", err
+		return "", errors.Join(err, transaction.rollback())
 	}
 	if err := transaction.setPhase("static_replaced"); err != nil {
-		rollbackErr := transaction.rollback()
-		if rollbackErr != nil {
-			return "", fmt.Errorf("记录配置应用阶段失败: %v；回滚失败: %w", err, rollbackErr)
-		}
-		return "", fmt.Errorf("记录配置应用阶段失败: %w", err)
+		return "", errors.Join(fmt.Errorf("记录配置应用阶段失败: %w", err), transaction.rollback())
 	}
 	if !configProcessRunning(options.SingBoxPath) {
 		if err := transaction.commit(); err != nil {
-			rollbackErr := transaction.rollback()
-			if rollbackErr != nil {
-				return "", fmt.Errorf("提交配置事务失败: %v；回滚失败: %w", err, rollbackErr)
-			}
-			return "", fmt.Errorf("提交配置事务失败: %w", err)
+			return "", errors.Join(fmt.Errorf("提交配置事务失败: %w", err), transaction.rollback())
 		}
 		return revision, nil
 	}
 	if err := transaction.setPhase("reload_started"); err != nil {
-		rollbackErr := transaction.rollback()
-		if rollbackErr != nil {
-			return "", fmt.Errorf("记录配置 reload 阶段失败: %v；回滚失败: %w", err, rollbackErr)
-		}
-		return "", fmt.Errorf("记录配置 reload 阶段失败: %w", err)
+		return "", errors.Join(fmt.Errorf("记录配置 reload 阶段失败: %w", err), transaction.rollback())
 	}
 	if err := configReload(ctx, options); err != nil {
 		restoreErr := transaction.restore()
 		if restoreErr != nil {
-			return "", fmt.Errorf("配置 reload 失败: %v；恢复旧配置失败: %w", err, restoreErr)
+			return "", errors.Join(fmt.Errorf("配置 reload 失败: %w", err), fmt.Errorf("恢复旧配置失败: %w", restoreErr))
 		}
 		if configProcessRunning(options.SingBoxPath) {
 			if restoreErr := configRestoreReload(ctx, options, transaction.journal); restoreErr != nil {
-				return "", fmt.Errorf("配置 reload 失败，且运行实例恢复失败: %v；%w", err, restoreErr)
+				return "", errors.Join(fmt.Errorf("配置 reload 失败: %w", err), fmt.Errorf("运行实例恢复失败: %w", restoreErr))
 			}
 		}
 		if cleanupErr := transaction.cleanup(); cleanupErr != nil {
-			return "", fmt.Errorf("配置 reload 失败，旧配置已恢复但清理事务失败: %v；%w", err, cleanupErr)
+			return "", errors.Join(fmt.Errorf("配置 reload 失败: %w", err), fmt.Errorf("旧配置已恢复但清理事务失败: %w", cleanupErr))
 		}
 		return "", fmt.Errorf("配置 reload 失败，已恢复旧配置: %w", err)
+	}
+	if target == "module" {
+		// reload 可能校正已失效的节点选择，revision 必须对应锁内最终内容。
+		applied, err := os.ReadFile(destination)
+		if err != nil {
+			return "", rollbackAfterCommitFailure(ctx, options, transaction, err)
+		}
+		revision = configRevision(applied)
 	}
 	if err := transaction.commit(); err != nil {
 		return "", rollbackAfterCommitFailure(ctx, options, transaction, err)
@@ -325,24 +326,24 @@ func ApplyConfig(ctx context.Context, options Options, target, source string, va
 func rollbackAfterCommitFailure(ctx context.Context, options Options, transaction *configApplyTransaction, commitErr error) error {
 	diskErr := transaction.restore()
 	var runtimeErr error
-	if configProcessRunning(options.SingBoxPath) {
+	if diskErr == nil && configProcessRunning(options.SingBoxPath) {
 		runtimeErr = configRestoreReload(ctx, options, transaction.journal)
 	}
-	cleanupErr := transaction.cleanup()
-	details := make([]string, 0, 3)
+	var cleanupErr error
+	if diskErr == nil && runtimeErr == nil {
+		cleanupErr = transaction.cleanup()
+	}
+	result := fmt.Errorf("提交配置事务失败: %w", commitErr)
 	if diskErr != nil {
-		details = append(details, fmt.Sprintf("磁盘恢复失败: %v", diskErr))
+		result = errors.Join(result, fmt.Errorf("磁盘恢复失败: %w", diskErr))
 	}
 	if runtimeErr != nil {
-		details = append(details, fmt.Sprintf("旧 runtime reload 失败: %v", runtimeErr))
+		result = errors.Join(result, fmt.Errorf("旧 runtime reload 失败: %w", runtimeErr))
 	}
 	if cleanupErr != nil {
-		details = append(details, fmt.Sprintf("事务清理失败: %v", cleanupErr))
+		result = errors.Join(result, fmt.Errorf("事务清理失败: %w", cleanupErr))
 	}
-	if len(details) == 0 {
-		return fmt.Errorf("提交配置事务失败: %w", commitErr)
-	}
-	return fmt.Errorf("提交配置事务失败: %w；%s", commitErr, strings.Join(details, "；"))
+	return result
 }
 
 func validateConfig(ctx context.Context, options Options, target, candidate string, content []byte) error {

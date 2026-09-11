@@ -3,6 +3,7 @@ import { parseCommandLine } from './command'
 import { ctl, ctlJson, shell, inKsu, completions as fetchCompletions } from './exec'
 import { formatCtlOutput } from './format'
 import { getHelp } from './help'
+import { createPoller } from './polling'
 import './style.css'
 
 const PROMPT = '❯ '
@@ -92,10 +93,10 @@ function renderServiceState(state?: string) {
   serviceState.style.color = status.color
 }
 
-async function pollStatus() {
-  const result = await ctlJson<{ state?: string }>(['service', 'status'])
-  if (result.ok) renderServiceState(result.data?.state)
-}
+const statusPoller = createPoller(
+  () => ctlJson<{ state?: string }>(['service', 'status']),
+  result => { if (result.ok) renderServiceState(result.data?.state) },
+)
 
 async function run(raw: string) {
   const command = raw.trim()
@@ -133,7 +134,7 @@ async function run(raw: string) {
       if (!args.includes('--raw')) out = formatCtlOutput(out)
       if (['service', 'sub', 'node', 'catalog'].includes(args[0])) {
         void refreshCompletions()
-        if (args[0] === 'service') void pollStatus()
+        if (args[0] === 'service') statusPoller.refresh()
       }
     }
 
@@ -207,23 +208,11 @@ nextButton.addEventListener('click', () => { historyNext(); input.focus() })
 runButton.addEventListener('click', () => { void run(input.value) })
 serviceStatus.addEventListener('click', event => { event.stopPropagation(); void run('service status') })
 
-let pollTimer: number | undefined
-function stopPolling() {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
-  pollTimer = undefined
-}
-function startPolling() {
-  stopPolling()
-  pollTimer = window.setInterval(() => { void pollStatus() }, 5000)
-}
-
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopPolling()
-  else { void pollStatus(); startPolling() }
+  statusPoller.setActive(!document.hidden)
 })
 
 environment.textContent = inKsu ? 'KernelSU' : '预览'
 append('help', getHelp())
-void pollStatus()
 void refreshCompletions()
-startPolling()
+statusPoller.setActive(!document.hidden)

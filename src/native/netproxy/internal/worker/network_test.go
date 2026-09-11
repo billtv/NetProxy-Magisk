@@ -156,6 +156,29 @@ func TestIsWiFiInterface(t *testing.T) {
 	}
 }
 
+func TestNetworkSnapshotCommandBudget(t *testing.T) {
+	for _, test := range []struct {
+		iface, status string
+		calls         int
+	}{
+		{"rmnet_data0", "", 0}, {"eth0", "", 0},
+		{"wlan0", `Wifi is connected to "Home", BSSID: 00:11:22:33:44:55`, 1},
+		{"wlan0", "Wifi is enabled", 2},
+	} {
+		calls := 0
+		_, err := getNetworkStateWith(t.Context(), func(_ context.Context, name string, _ ...string) (string, error) {
+			calls++
+			if name == "cmd" {
+				return test.status, nil
+			}
+			return `WifiInfo: SSID: "Home", BSSID: 00:11:22:33:44:55`, nil
+		}, func(context.Context) (string, error) { return test.iface, nil })
+		if err != nil || calls != test.calls {
+			t.Fatalf("%s: 命令数=%d, 期望=%d, err=%v", test.iface, calls, test.calls, err)
+		}
+	}
+}
+
 func TestNetworkStateFingerprintIncludesPolicyInputs(t *testing.T) {
 	base := NetworkState{
 		NetworkType:     "wifi",

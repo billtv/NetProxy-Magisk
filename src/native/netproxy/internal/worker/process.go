@@ -28,13 +28,13 @@ func Start(ctx context.Context, options Options, executable string) (Status, err
 	if err := validateOptions(options); err != nil {
 		return Status{}, err
 	}
-	if status, err := ReadStatus(options); err == nil {
+	if status, err := ReadStatus(ctx, options); err == nil {
 		if status.State == "running" {
 			return status, nil
 		}
 		_ = os.Remove(options.PIDFile)
 	}
-	nearest, err := NextUpdate(options.Root, options.Now())
+	nearest, err := NextUpdate(ctx, options.Root, options.Now())
 	if err != nil {
 		return Status{}, err
 	}

@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -15,8 +16,8 @@ type PackageUIDResolution struct {
 }
 
 // ResolvePackageUIDs 使用 Android package service 将用户包名解析为精确 UID。
-func ResolvePackageUIDs(refs []PackageRef) (PackageUIDResolution, error) {
-	return resolvePackageUIDs(refs, listPackageUIDs)
+func ResolvePackageUIDs(ctx context.Context, refs []PackageRef) (PackageUIDResolution, error) {
+	return resolvePackageUIDs(refs, func(user uint32) (map[string]uint32, error) { return listPackageUIDs(ctx, user) })
 }
 
 func resolvePackageUIDs(refs []PackageRef, list func(uint32) (map[string]uint32, error)) (PackageUIDResolution, error) {
@@ -47,11 +48,14 @@ func resolvePackageUIDs(refs []PackageRef, list func(uint32) (map[string]uint32,
 	return PackageUIDResolution{UIDs: uniqueUint32(result), Missing: missing}, nil
 }
 
-func listPackageUIDs(userID uint32) (map[string]uint32, error) {
-	command := exec.Command("cmd", "package", "list", "packages", "--user", strconv.FormatUint(uint64(userID), 10), "-U")
+func listPackageUIDs(ctx context.Context, userID uint32) (map[string]uint32, error) {
+	command := exec.CommandContext(ctx, "cmd", "package", "list", "packages", "--user", strconv.FormatUint(uint64(userID), 10), "-U")
 	var stderr strings.Builder
 	command.Stderr = &stderr
 	output, err := command.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return parsePackageUIDCommandResult(userID, string(output), stderr.String(), err)
 }
 

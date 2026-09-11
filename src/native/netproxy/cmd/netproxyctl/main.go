@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 )
 
@@ -22,8 +23,7 @@ type result struct {
 }
 
 type cli struct {
-	moduleDir  string
-	commandCtx context.Context
+	options moduleapp.Options
 }
 
 const (
@@ -38,7 +38,9 @@ func main() {
 
 func newCLI() *cli {
 	layout := paths.Default()
-	return &cli{moduleDir: layout.Root()}
+	options := moduleapp.NewOptions(layout.Root())
+	options.ProgressDir = defaultProgressDir()
+	return &cli{options: options}
 }
 
 func (c *cli) run(ctx context.Context, args []string) int {
@@ -63,32 +65,33 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	c.commandCtx = commandCtx
+	var handler commandHandler
 
 	switch args[0] {
 	case "service":
-		return c.service(commandCtx, args[1:])
+		handler = c.service
 	case "catalog":
-		return c.catalog(args[1:])
+		handler = c.catalog
 	case "node":
-		return c.node(args[1:])
+		handler = c.node
 	case "sub":
-		return c.subscription(args[1:])
+		handler = c.subscription
 	case "mode":
-		return c.mode(args[1:])
+		handler = c.mode
 	case "network":
-		return c.network(args[1:])
+		handler = c.network
 	case "app":
-		return c.app(args[1:])
+		handler = c.app
 	case "ebpf":
-		return c.ebpf(args[1:])
+		handler = c.ebpf
 	case "config":
-		return c.config(args[1:])
+		handler = c.config
 	case "logs":
-		return c.logs(args[1:])
+		handler = c.logs
 	default:
 		return c.fail("usage.invalid", "未知命令组，使用 netproxyctl help 查看帮助", 2)
 	}
+	return c.runCommand(commandCtx, handler, args[1:]...)
 }
 
 func (c *cli) runInternal(ctx context.Context, args []string) int {
@@ -187,11 +190,4 @@ func parseCommandTimeout(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("--timeout 无效: %s", value)
 	}
 	return duration, nil
-}
-
-func (c *cli) context() context.Context {
-	if c.commandCtx != nil {
-		return c.commandCtx
-	}
-	return context.Background()
 }

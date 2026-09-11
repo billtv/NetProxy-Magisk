@@ -1,46 +1,52 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	json "encoding/json/v2"
+
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/subscription"
 )
 
-func (c *cli) runModuleCommand(args []string, action string, handler commandHandler) int {
-	if action == "app" && len(args) == 0 {
-		args = []string{"list"}
+func moduleSubscriptionError(err error) error {
+	if structured, ok := errors.AsType[*subscription.Error](err); ok {
+		return &resultError{Code: structured.Code, Message: structured.Message, Data: structured.Data}
 	}
-	if action == "logs" && len(args) == 0 {
-		args = []string{"show"}
-	}
-	return c.runCommand(c.context(), handler, c.moduleArgs(action, args...)...)
+	return err
 }
 
-func (c *cli) moduleArgs(action string, args ...string) []string {
-	result := make([]string, 0, len(args)+2)
-	if (action == "app" || action == "node" || action == "sub" || action == "network" || action == "config" || action == "logs") && len(args) > 0 {
-		result = append(result, args[0])
-		args = args[1:]
+func readActiveGroup(options moduleapp.Options) string {
+	module, err := moduleconfig.LoadModule(options.ModuleConfig)
+	if err != nil {
+		return ""
 	}
-	result = append(result,
-		"--module-dir", c.moduleDir,
-	)
-	return append(result, args...)
+	return module.ActiveGroupID
 }
 
-func (c *cli) nodeReadArgs(action string, args ...string) []string {
-	result := []string{action}
-	result = append(result,
-		"--module-dir", c.moduleDir,
-	)
-	return append(result, args...)
+func usageError(message string) error {
+	return &resultError{Code: "usage.invalid", Message: message, Status: 2}
 }
 
-func (c *cli) catalogArgs(args ...string) []string {
-	return append([]string{"--module-dir", c.moduleDir}, args...)
+type commandHandler func(context.Context, []string) error
+
+func (c *cli) runCommand(ctx context.Context, handler commandHandler, args ...string) int {
+	if err := handler(ctx, args); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return c.fail("command.timeout", "命令执行超时", 124)
+		}
+		if structured, ok := errors.AsType[*resultError](err); ok {
+			return c.failData(structured.Code, structured.Message, structured.Data, structured.Status)
+		}
+		return c.fail("command.failed", err.Error(), 1)
+	}
+	return 0
 }
 
 func (c *cli) fail(code, message string, status int) int {

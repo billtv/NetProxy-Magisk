@@ -196,7 +196,7 @@ internal class SettingsViewModel(
         val module = ShellConfigFile.parse(moduleContent.await())
         val ebpf = ShellConfigFile.parse(ebpfContent.await())
         SettingsUiState(
-            autoStartEnabled = module["AUTO_START"] == "1",
+            autoStartEnabled = ShellConfigFile.boolean(module["AUTO_START"]),
             proxySettings = parseProxySettings(module, ebpf),
             isLoading = false
         )
@@ -206,7 +206,7 @@ internal class SettingsViewModel(
         _state.update { current ->
             val settings = current.proxySettings
             when (key) {
-                "AUTO_START" -> current.copy(autoStartEnabled = value == "1")
+                "AUTO_START" -> current.copy(autoStartEnabled = ShellConfigFile.boolean(value))
                 "EBPF_NETWORK" -> current.copy(proxySettings = settings.copy(network = value))
                 "EBPF_LOCAL_DNS_MODE" -> current.copy(
                     proxySettings = settings.copy(localDnsMode = value)
@@ -218,30 +218,30 @@ internal class SettingsViewModel(
 
                 "EBPF_LOCAL_ENABLED" -> current.copy(
                     proxySettings = settings.copy(
-                        localEnabled = value == "1"
+                        localEnabled = ShellConfigFile.boolean(value)
                     )
                 )
 
                 "EBPF_SHARED_ENABLED" -> current.copy(
                     proxySettings = settings.copy(
-                        sharedEnabled = value == "1"
+                        sharedEnabled = ShellConfigFile.boolean(value)
                     )
                 )
 
                 "EBPF_LOCAL_IPV6" -> current.copy(
-                    proxySettings = settings.copy(localIpv6 = value == "1")
+                    proxySettings = settings.copy(localIpv6 = ShellConfigFile.boolean(value))
                 )
 
                 "EBPF_SHARED_IPV6" -> current.copy(
-                    proxySettings = settings.copy(sharedIpv6 = value == "1")
+                    proxySettings = settings.copy(sharedIpv6 = ShellConfigFile.boolean(value))
                 )
 
                 "EBPF_LOCAL_BYPASS_PRIVATE_ADDRESS" -> current.copy(
-                    proxySettings = settings.copy(localBypassPrivateAddress = value == "1")
+                    proxySettings = settings.copy(localBypassPrivateAddress = ShellConfigFile.boolean(value))
                 )
 
                 "EBPF_SHARED_BYPASS_PRIVATE_ADDRESS" -> current.copy(
-                    proxySettings = settings.copy(sharedBypassPrivateAddress = value == "1")
+                    proxySettings = settings.copy(sharedBypassPrivateAddress = ShellConfigFile.boolean(value))
                 )
 
                 "EBPF_LOCAL_BYPASS_PORT" -> current.copy(
@@ -285,7 +285,7 @@ internal class SettingsViewModel(
                 )
 
                 "WIFI_AUTO_SWITCH" -> current.copy(
-                    proxySettings = settings.copy(wifiAutoSwitch = value == "1")
+                    proxySettings = settings.copy(wifiAutoSwitch = ShellConfigFile.boolean(value))
                 )
 
                 "WIFI_SSID_MODE" -> current.copy(
@@ -297,7 +297,7 @@ internal class SettingsViewModel(
                 )
 
                 "PROXY_ON_CELLULAR" -> current.copy(
-                    proxySettings = settings.copy(proxyOnCellular = value == "1")
+                    proxySettings = settings.copy(proxyOnCellular = ShellConfigFile.boolean(value))
                 )
 
                 else -> current
@@ -311,7 +311,7 @@ internal class SettingsViewModel(
     ): ProxySettings {
         fun value(key: String, default: String) = ebpf[key] ?: default
         fun enabled(key: String, default: Boolean = false) =
-            ebpf[key]?.let { it == "1" } ?: default
+            ShellConfigFile.boolean(ebpf[key], default)
 
         return ProxySettings(
             localEnabled = enabled("EBPF_LOCAL_ENABLED", true),
@@ -335,10 +335,10 @@ internal class SettingsViewModel(
             sharedExcludeSourceCidrs = value("EBPF_SHARED_EXCLUDE_SOURCE_CIDR", ""),
             sharedIncludeMacAddresses = value("EBPF_SHARED_INCLUDE_MAC_ADDRESS", ""),
             sharedExcludeMacAddresses = value("EBPF_SHARED_EXCLUDE_MAC_ADDRESS", ""),
-            wifiAutoSwitch = module["WIFI_AUTO_SWITCH"] == "1",
+            wifiAutoSwitch = ShellConfigFile.boolean(module["WIFI_AUTO_SWITCH"]),
             wifiSsidMode = module["WIFI_SSID_MODE"] ?: "blacklist",
             wifiSsidList = module["WIFI_SSID_LIST"].orEmpty(),
-            proxyOnCellular = module["PROXY_ON_CELLULAR"] != "0"
+            proxyOnCellular = ShellConfigFile.boolean(module["PROXY_ON_CELLULAR"], true)
         )
     }
 

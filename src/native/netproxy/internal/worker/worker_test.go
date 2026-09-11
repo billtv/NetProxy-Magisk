@@ -111,7 +111,7 @@ func prepareWorkerFixture(t *testing.T, serverURL string, now time.Time) (string
 	metadata.UpdateViaProxy = "never"
 	metadata.NextUpdateEpoch = now.Unix() - 1
 	metadata.NextUpdateAt = catalog.FormatEpochUTC(metadata.NextUpdateEpoch)
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[]}`+"\n"), 0o600); err != nil {
@@ -138,7 +138,7 @@ func waitRevision(t *testing.T, path string, expected int64) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		metadata, err := catalog.LoadMetadata(path, "fixture")
+		metadata, err := catalog.LoadMetadata(context.Background(), path, "fixture")
 		if err == nil && metadata.Revision >= expected {
 			return
 		}
@@ -181,7 +181,9 @@ func installPersistenceHooks(t *testing.T, updateModule func(string, map[string]
 	t.Helper()
 	originalUpdateModule, originalGroupHasNodes := workerUpdateModule, workerGroupHasNodes
 	if updateModule != nil {
-		workerUpdateModule = updateModule
+		workerUpdateModule = func(_ context.Context, path string, updates map[string]string) error {
+			return updateModule(path, updates)
+		}
 	}
 	if groupHasNodes != nil {
 		workerGroupHasNodes = groupHasNodes
@@ -240,12 +242,12 @@ func TestSyncEditedGroupReloadsAfterNameChange(t *testing.T) {
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[{"type":"socks","tag":"edited-node","server":"127.0.0.1","server_port":1080}]}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
 	metadata.Name = "新的运行时名称"
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	options := newTestOptions(root)
@@ -390,7 +392,7 @@ func TestUpdateGroupWhenServiceStoppedEffectFailureStoresMetadata(t *testing.T) 
 	if !result.Persisted || result.RuntimeSyncState != subscription.RuntimeSyncNotRunning {
 		t.Fatalf("本地副作用失败结果状态异常: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +435,7 @@ func TestUpdateGroupWhenServiceStoppedReturnsCatalogReadErrorWithMetadata(t *tes
 	if !result.Persisted || result.RuntimeSyncState != subscription.RuntimeSyncNotRunning {
 		t.Fatalf("Catalog 读取失败结果状态异常: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +565,7 @@ func TestUpdateGroupRuntimeSyncFailureReturnsStructuredErrorAndKeepsProvider(t *
 	if !result.Persisted || result.RuntimeSynced || result.RuntimeSyncState != subscription.RuntimeSyncFailed {
 		t.Fatalf("运行时失败结果异常: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +652,7 @@ func TestUpdateGroupRuntimeVerificationFailureReturnsStructuredError(t *testing.
 	if _, err := provider.Load(context.Background(), filepath.Join(root, "fixture", "provider.json")); err != nil {
 		t.Fatalf("运行时状态验证失败后 Provider 不可读: %v", err)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +744,7 @@ func TestUpdateGroup304StoppedAndRunningStates(t *testing.T) {
 		if _, err := UpdateGroup(context.Background(), options, "fixture", now, nil); err == nil {
 			t.Fatal("首次运行时同步失败应返回错误")
 		}
-		metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+		metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -760,7 +762,7 @@ func TestUpdateGroup304StoppedAndRunningStates(t *testing.T) {
 		if reloadCalls != 1 {
 			t.Fatalf("304 可直接验证已生效的 Provider，不应再次 reload，实际 %d 次", reloadCalls)
 		}
-		metadata, err = catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+		metadata, err = catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -802,14 +804,14 @@ func TestNextUpdateUsesNearestEnabledSubscription(t *testing.T) {
 		if err := os.MkdirAll(group, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := catalog.SaveMetadataAtomic(filepath.Join(group, "meta.json"), metadata); err != nil {
+		if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(group, "meta.json"), metadata); err != nil {
 			t.Fatal(err)
 		}
 	}
 	options := newTestOptions(root)
 	options.ModuleConf = filepath.Join(root, "module.conf")
 	options.Now = func() time.Time { return now }
-	got, err := NextUpdate(root, now)
+	got, err := NextUpdate(context.Background(), root, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +919,7 @@ func TestRunWakeProcessesMultipleRoundsAndRestartsFromStalePID(t *testing.T) {
 		t.Fatal("多轮 Worker 取消超时")
 	}
 
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +929,7 @@ func TestRunWakeProcessesMultipleRoundsAndRestartsFromStalePID(t *testing.T) {
 	markStaleWorker(t, options.PIDFile)
 	metadata.NextUpdateEpoch = clock.Now().Unix() - 1
 	metadata.NextUpdateAt = catalog.FormatEpochUTC(metadata.NextUpdateEpoch)
-	if err := catalog.SaveMetadataAtomic(filepath.Join(root, "fixture", "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(root, "fixture", "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1026,7 +1028,7 @@ func TestRunDueContinuesAfterOneSubscriptionFails(t *testing.T) {
 		metadata.UpdateViaProxy = "never"
 		metadata.NextUpdateEpoch = now.Unix() - 1
 		metadata.NextUpdateAt = catalog.FormatEpochUTC(metadata.NextUpdateEpoch)
-		if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+		if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 			t.Fatal(err)
 		}
 		if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[]}`+"\n"), 0o600); err != nil {
@@ -1150,7 +1152,7 @@ func TestWorkerRetrySuccessRestoresNormalSchedule(t *testing.T) {
 		t.Fatal("Worker did not stop after retry success")
 	}
 
-	metadata, err := catalog.LoadMetadata(filepath.Join(root, "fixture", "meta.json"), "fixture")
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "fixture", "meta.json"), "fixture")
 	if err != nil {
 		t.Fatal(err)
 	}

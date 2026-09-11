@@ -10,6 +10,9 @@ import com.fanjv.netproxy.core.ui.UiText
 import com.fanjv.netproxy.core.ui.toUiText
 import com.fanjv.netproxy.core.ui.userMessage
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -171,6 +174,7 @@ internal class CatalogDashboardViewModel(
         val requestRevision = serviceTransitionRevision
 
         runCatching { repository.status() }.onSuccess { service ->
+            currentCoroutineContext().ensureActive()
             if (!shouldApplyDashboardSnapshot(
                     requestRevision = requestRevision,
                     currentRevision = serviceTransitionRevision,
@@ -198,6 +202,7 @@ internal class CatalogDashboardViewModel(
                 )
             }
         }.onFailure { error ->
+            if (error is CancellationException) throw error
             if (!shouldApplyDashboardSnapshot(
                     requestRevision = requestRevision,
                     currentRevision = serviceTransitionRevision,

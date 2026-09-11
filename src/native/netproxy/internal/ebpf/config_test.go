@@ -158,7 +158,7 @@ PROXY_APPS_LIST="0:com.example.installed,10:com.example.removed"
 	if !reflect.DeepEqual(built.MissingPackages, []PackageRef{{UserID: 10, Package: "com.example.removed"}}) {
 		t.Fatalf("unexpected missing package refs: %#v", built.MissingPackages)
 	}
-	if got := built.Runtime.Inbounds[0].Local.IncludeUID; !reflect.DeepEqual(got, []uint32{0, 10123}) {
+	if got := []uint32(built.Runtime.Inbounds[0].Local.IncludeUID); !reflect.DeepEqual(got, []uint32{0, 10123}) {
 		t.Fatalf("missing package changed whitelist UIDs: %#v", got)
 	}
 }
@@ -191,7 +191,7 @@ PROXY_APPS_LIST="0:com.example.removed,10:com.example.otherremoved"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := built.Runtime.Inbounds[0].Local.IncludeUID; !reflect.DeepEqual(got, []uint32{0}) {
+	if got := []uint32(built.Runtime.Inbounds[0].Local.IncludeUID); !reflect.DeepEqual(got, []uint32{0}) {
 		t.Fatalf("whitelist without installed packages lost root UID: %#v", got)
 	}
 }

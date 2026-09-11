@@ -141,7 +141,7 @@ func TestRuntimeTagIgnoresEmptyDuplicateGroup(t *testing.T) {
 			t.Fatalf("empty duplicate changed summary RuntimeTag: %#v", groups)
 		}
 	}
-	runtimeTag, err := RuntimeTag(root, "ready")
+	runtimeTag, err := RuntimeTag(context.Background(), root, "ready")
 	if err != nil || runtimeTag != "同名分组" {
 		t.Fatalf("RuntimeTag = %q, err=%v", runtimeTag, err)
 	}
@@ -167,7 +167,7 @@ func TestRuntimeTagIgnoresEmptyDuplicateGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	updateNodeCount(t, filepath.Join(root, "empty", "meta.json"), 1)
-	runtimeTag, err = RuntimeTag(root, "ready")
+	runtimeTag, err = RuntimeTag(context.Background(), root, "ready")
 	if err != nil || runtimeTag != "同名分组 [ready]" {
 		t.Fatalf("non-empty duplicate RuntimeTag = %q, err=%v", runtimeTag, err)
 	}
@@ -321,14 +321,14 @@ func TestSchedule(t *testing.T) {
 	updateSchedule(t, filepath.Join(root, "due", "meta.json"), true, 100)
 	updateSchedule(t, filepath.Join(root, "future", "meta.json"), true, 300)
 
-	result, err := Schedule(root, 200)
+	result, err := Schedule(context.Background(), root, 200)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Nearest != 100 || len(result.Due) != 1 || result.Due[0] != "due" {
 		t.Fatalf("unexpected schedule: %#v", result)
 	}
-	ids, err := GroupIDs(root, "subscription")
+	ids, err := GroupIDs(context.Background(), root, "subscription")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -71,6 +71,9 @@ src/module/service.sh
 - Native JSON 编解码统一使用 Go 标准库 `encoding/json/v2` 与 `encoding/json/jsontext`，依赖严格字段匹配、重复键拒绝和 UTF-8 校验；持久文件与 `schema=1` 输出必须显式传入 `json.Deterministic(true)`，不要回退到 v1 或设置 `GOEXPERIMENT=nojsonv2`。
 - `cmd/netproxyctl/default.pgo` 只使用真实 Android 上的只读工作负载生成；正式构建保持 `-pgo=auto`，更新 profile 前必须确认不含订阅、节点或设备数据，并对比非 PGO 产物。
 - Provider 修改必须保持完整校验、稳定 tag、`0600` 权限和原子替换。错误必须返回结构化 diagnostics，不允许空输出加成功退出码。
+- Catalog 与配置回滚使用同目录临时文件替换目标，全部恢复成功并记录恢复完成后才删除备份；恢复失败不得清理 journal，否则再次中断可能丢失已恢复的数据。
+- 配置应用按「生命周期锁 → 固定顺序的配置文件锁」执行。内部选择同步显式复用已持有的配置写入器，不能重复获取文件锁；所有配置写入共享同一路径锁，分应用增删必须在锁内读取最新名单。
+- Catalog 等待锁使用调用方 context，分组锁先于根锁。锁文件不保存业务或 owner 状态，互斥由操作系统文件锁保证。
 - sing-box 静态事实源只有 `config/singbox/config.json`。分区编辑由 Go 在配置事务锁内替换指定顶层字段，保留其他字段和数组顺序；客户端使用读取时的 `revision`，同分区冲突返回 `config.conflict`。不能在 Android 中把整份旧快照合并写回。
 - 新增协议或修复解析缺陷时补充不含真实凭据的 fixture/golden 测试。
 

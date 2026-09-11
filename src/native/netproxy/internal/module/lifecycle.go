@@ -150,7 +150,7 @@ func StartService(ctx context.Context, options Options) error {
 	if err := checkPreparedConfiguration(ctx, options, prepared); err != nil {
 		return failServiceStart(options, 0, 0, "sing-box 配置检查失败", err)
 	}
-	if err := syncRuntimeSelection(options.ModuleConfig, prepared.RuntimeResult); err != nil {
+	if err := syncRuntimeSelection(ctx, options, prepared.RuntimeResult); err != nil {
 		return failServiceStart(options, 0, 0, "运行时选择状态同步失败", err)
 	}
 
@@ -306,7 +306,7 @@ func reloadPreparedService(ctx context.Context, options Options, prepared Prepar
 	if syncSelection {
 		syncOptions := options
 		syncOptions.SkipServiceReload = true
-		if err := syncRuntimeSelection(options.ModuleConfig, prepared.RuntimeResult); err != nil {
+		if err := syncRuntimeSelection(ctx, options, prepared.RuntimeResult); err != nil {
 			return restoreReloadState(ctx, options, pid, startedAt, state.ReadyAt, err)
 		}
 		if _, err := SyncSelection(ctx, syncOptions); err != nil {

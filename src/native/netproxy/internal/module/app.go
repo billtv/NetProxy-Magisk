@@ -44,6 +44,7 @@ type Options struct {
 	WiFiStateFile      string
 	SkipServiceReload  bool
 	RequestTimeout     time.Duration
+	configEditors      map[string]*moduleconfig.Editor
 }
 
 // NewOptions 根据模块根目录返回完整的默认路径。
@@ -110,7 +111,7 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	missingPackages, err := ebpf.WriteAtomic(ebpfPath, config)
+	missingPackages, err := ebpf.WriteAtomic(ctx, ebpfPath, config)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -120,8 +121,8 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, EBPF: ebpfPath}, nil
 }
 
-func syncRuntimeSelection(path string, runtime catalog.RuntimeResult) error {
-	module, err := moduleconfig.LoadModule(path)
+func syncRuntimeSelection(ctx context.Context, options Options, runtime catalog.RuntimeResult) error {
+	module, err := moduleconfig.LoadModule(options.ModuleConfig)
 	if err != nil {
 		return err
 	}
@@ -135,7 +136,17 @@ func syncRuntimeSelection(path string, runtime catalog.RuntimeResult) error {
 	if module.SelectedNodeRef != runtime.SelectedNodeRef {
 		updates["SELECTED_NODE_REF"] = moduleconfig.Quote(runtime.SelectedNodeRef)
 	}
-	return moduleconfig.UpdateModule(path, updates)
+	return options.updateModule(ctx, updates)
+}
+
+func (options Options) updateModule(ctx context.Context, updates map[string]string) error {
+	if editor := options.configEditors[filepath.Clean(options.ModuleConfig)]; editor != nil {
+		return editor.Update(updates, func(candidate string) error {
+			_, err := moduleconfig.LoadModule(candidate)
+			return err
+		})
+	}
+	return moduleconfig.UpdateModule(ctx, options.ModuleConfig, updates)
 }
 
 // Check 生成隔离运行时配置并执行 sing-box check。
@@ -174,7 +185,7 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 		if strings.TrimSpace(group) == "" {
 			group = module.ActiveGroupID
 		}
-		group, err = catalog.ResolveGroup(options.CatalogRoot, group)
+		group, err = catalog.ResolveGroup(ctx, options.CatalogRoot, group)
 		if err != nil {
 			return nil, err
 		}
@@ -189,11 +200,11 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 			"ACTIVE_GROUP_ID": moduleconfig.Quote(group), "SELECTOR_MODE": "urltest",
 			"SELECTED_NODE_REF": moduleconfig.Quote(""),
 		}
-		if err := moduleconfig.UpdateModule(options.ModuleConfig, updates); err != nil {
+		if err := options.updateModule(ctx, updates); err != nil {
 			return nil, err
 		}
 		persisted = true
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, group)
+		runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, group)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +217,7 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 	if !found || groupID == "" || tag == "" {
 		return nil, errors.New("节点引用格式应为 <group-id>/<tag>")
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -217,11 +228,11 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 		}
 		return nil, fmt.Errorf("未找到节点: %s/%s", groupID, tag)
 	}
-	runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, groupID)
+	runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return nil, err
 	}
-	if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{
+	if err := options.updateModule(ctx, map[string]string{
 		"ACTIVE_GROUP_ID": moduleconfig.Quote(groupID), "SELECTOR_MODE": "manual",
 		"SELECTED_NODE_REF": moduleconfig.Quote(groupID + "/" + tag),
 	}); err != nil {
@@ -307,7 +318,7 @@ func ApplyMode(ctx context.Context, options Options, mode string) (err error) {
 	if mode != "rule" && mode != "global" && mode != "direct" && mode != "AllowAds" {
 		return fmt.Errorf("未知出站模式: %s", mode)
 	}
-	if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"OUTBOUND_MODE": mode}); err != nil {
+	if err := options.updateModule(ctx, map[string]string{"OUTBOUND_MODE": mode}); err != nil {
 		return err
 	}
 	persisted = true
@@ -333,9 +344,14 @@ func ApplyMode(ctx context.Context, options Options, mode string) (err error) {
 }
 
 // UpdateApp 按类型化 eBPF 配置修改分应用策略。
-func UpdateApp(options Options, action, value string) (data AppPolicy, err error) {
+func UpdateApp(ctx context.Context, options Options, action, value string) (data AppPolicy, err error) {
 	persisted := false
 	defer func() { logOperation(options, "app", "app-policy.update", "分应用策略更新", persisted, err) }()
+	editor, err := moduleconfig.Lock(ctx, options.EBPFConfig)
+	if err != nil {
+		return AppPolicy{}, err
+	}
+	defer editor.Release()
 	config, err := ebpf.Load(options.EBPFConfig)
 	if err != nil {
 		return AppPolicy{}, err
@@ -371,7 +387,7 @@ func UpdateApp(options Options, action, value string) (data AppPolicy, err error
 	default:
 		return AppPolicy{}, fmt.Errorf("未知应用操作: %s", action)
 	}
-	if err := moduleconfig.UpdateValidated(options.EBPFConfig, updates, func(candidate string) error {
+	if err := editor.Update(updates, func(candidate string) error {
 		_, validateErr := ebpf.Load(candidate)
 		return validateErr
 	}); err != nil {
@@ -403,7 +419,7 @@ func NodeAppend(ctx context.Context, options Options, groupID, input string, all
 	if groupID == "" {
 		groupID = "default"
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
@@ -447,7 +463,7 @@ func NodeEdit(ctx context.Context, options Options, reference, input string, all
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
@@ -468,7 +484,7 @@ func NodeRemove(ctx context.Context, options Options, reference string) (mutatio
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
@@ -489,11 +505,11 @@ func NodeRemove(ctx context.Context, options Options, reference string) (mutatio
 func RemoveSubscription(ctx context.Context, options Options, query, replacement string) (err error) {
 	deleted := false
 	defer func() { logOperation(options, "subscription", "subscription.remove", "订阅删除", deleted, err) }()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err != nil {
 		return err
 	}
-	typ, err := catalog.GroupType(options.CatalogRoot, groupID)
+	typ, err := catalog.GroupType(ctx, options.CatalogRoot, groupID)
 	if err != nil || typ != "subscription" {
 		return errors.New("目标不是 URL 订阅")
 	}
@@ -503,7 +519,7 @@ func RemoveSubscription(ctx context.Context, options Options, query, replacement
 	}
 	if module.ActiveGroupID == groupID {
 		if replacement != "" {
-			replacement, err = catalog.ResolveGroup(options.CatalogRoot, replacement)
+			replacement, err = catalog.ResolveGroup(ctx, options.CatalogRoot, replacement)
 			if err != nil {
 				return err
 			}
@@ -518,7 +534,7 @@ func RemoveSubscription(ctx context.Context, options Options, query, replacement
 				return err
 			}
 		} else {
-			if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
+			if err := options.updateModule(ctx, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
 				return err
 			}
 			if service.ProcessRunning(options.SingBoxPath) {
@@ -528,7 +544,7 @@ func RemoveSubscription(ctx context.Context, options Options, query, replacement
 			}
 		}
 	}
-	if err := catalog.DeleteGroup(options.CatalogRoot, groupID); err != nil {
+	if err := catalog.DeleteGroup(ctx, options.CatalogRoot, groupID); err != nil {
 		return err
 	}
 	deleted = true
@@ -559,10 +575,10 @@ func syncCatalogChange(ctx context.Context, options Options, groupID string, str
 			return err
 		}
 		if _, statErr := os.Stat(filepath.Join(options.CatalogRoot, "default", "meta.json")); statErr == nil {
-			if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote("default"), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
+			if err := options.updateModule(ctx, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote("default"), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
 				return err
 			}
-		} else if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
+		} else if err := options.updateModule(ctx, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
 			return err
 		}
 	}
@@ -675,7 +691,7 @@ func AddSubscription(ctx context.Context, options SubscriptionOptions) (result s
 	if err := ensureDefaultGroup(ctx, options.Options); err != nil {
 		return subscription.Result{}, err
 	}
-	groupID, err := catalog.NewSubscriptionGroupID(options.CatalogRoot)
+	groupID, err := catalog.NewSubscriptionGroupID(ctx, options.CatalogRoot)
 	if err != nil {
 		return subscription.Result{}, err
 	}
@@ -702,7 +718,7 @@ func UpdateSubscription(ctx context.Context, options Options, query string) (res
 	defer func() {
 		logOperation(options, "subscription", "subscription.update", "订阅更新", result.Persisted, err)
 	}()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err != nil {
 		return subscription.Result{}, err
 	}
@@ -714,7 +730,7 @@ func EditSubscription(ctx context.Context, options Options, query string, edit s
 	defer func() {
 		logOperation(options, "subscription", "subscription.edit", "订阅编辑", result.Persisted, err)
 	}()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err != nil {
 		return subscription.EditResult{}, err
 	}
@@ -784,7 +800,7 @@ func UpdateAllSubscriptions(ctx context.Context, options Options) (result worker
 	defer func() {
 		logOperation(options, "subscription", "subscription.update-all", "全部订阅更新", false, err)
 	}()
-	ids, err := catalog.GroupIDs(options.CatalogRoot, "subscription")
+	ids, err := catalog.GroupIDs(ctx, options.CatalogRoot, "subscription")
 	if err != nil {
 		return worker.Summary{}, err
 	}

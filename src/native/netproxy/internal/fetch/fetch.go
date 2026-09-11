@@ -113,6 +113,7 @@ func Subscription(ctx context.Context, request Request) (Response, error) {
 			InsecureSkipVerify: request.AllowInsecure, // Explicit user option.
 		},
 	}
+	defer transport.CloseIdleConnections()
 	if request.ProxyURL != "" {
 		proxyURL, err := url.Parse(request.ProxyURL)
 		if err != nil {

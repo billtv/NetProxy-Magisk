@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	json "encoding/json/v2"
 
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 )
 
@@ -41,6 +43,35 @@ type configApplyTransaction struct {
 
 func configTransactionPath(options Options) string {
 	return filepath.Join(options.RuntimeDir, configTransactionDirectory)
+}
+
+func lockConfigFiles(ctx context.Context, options Options, paths ...string) (Options, func(), error) {
+	paths = uniqueConfigPaths(paths...)
+	sort.Strings(paths)
+	editors := make(map[string]*moduleconfig.Editor, len(paths))
+	for path, editor := range options.configEditors {
+		editors[path] = editor
+	}
+	var acquired []*moduleconfig.Editor
+	release := func() {
+		for index := len(acquired) - 1; index >= 0; index-- {
+			_ = acquired[index].Release()
+		}
+	}
+	for _, path := range paths {
+		if editors[path] != nil {
+			continue
+		}
+		editor, err := moduleconfig.Lock(ctx, path)
+		if err != nil {
+			release()
+			return options, nil, err
+		}
+		editors[path] = editor
+		acquired = append(acquired, editor)
+	}
+	options.configEditors = editors
+	return options, release, nil
 }
 
 func beginConfigApply(options Options, destination string) (*configApplyTransaction, error) {
@@ -132,8 +163,13 @@ func createConfigSnapshot(directory, name, path string) (configFileSnapshot, err
 }
 
 func (transaction *configApplyTransaction) setPhase(phase string) error {
+	previous := transaction.journal.Phase
 	transaction.journal.Phase = phase
-	return transaction.writeJournal()
+	if err := transaction.writeJournal(); err != nil {
+		transaction.journal.Phase = previous
+		return err
+	}
+	return nil
 }
 
 func (transaction *configApplyTransaction) writeJournal() error {
@@ -157,15 +193,17 @@ func (transaction *configApplyTransaction) restore() error {
 }
 
 func (transaction *configApplyTransaction) cleanup() error {
+	if err := transaction.setPhase("rolled_back"); err != nil {
+		return err
+	}
 	return os.RemoveAll(transaction.directory)
 }
 
 func (transaction *configApplyTransaction) rollback() error {
-	restoreErr := transaction.restore()
-	if cleanupErr := transaction.cleanup(); restoreErr == nil {
-		restoreErr = cleanupErr
+	if err := transaction.restore(); err != nil {
+		return err
 	}
-	return restoreErr
+	return transaction.cleanup()
 }
 
 func recoverConfigApply(ctx context.Context, options Options) error {
@@ -187,12 +225,22 @@ func recoverConfigApply(ctx context.Context, options Options) error {
 	if journal.Version != 1 || journal.Phase == "" {
 		return errors.New("配置应用事务版本或阶段无效")
 	}
-	if journal.Phase == "committed" {
+	if journal.Phase == "committed" || journal.Phase == "rolled_back" {
 		return os.RemoveAll(directory)
 	}
 	if err := validateConfigJournal(options, journal); err != nil {
 		return err
 	}
+	var staticPaths []string
+	for _, snapshot := range journal.Static {
+		staticPaths = append(staticPaths, snapshot.Path)
+	}
+	lockedOptions, release, err := lockConfigFiles(ctx, options, staticPaths...)
+	if err != nil {
+		return err
+	}
+	defer release()
+	options = lockedOptions
 	if err := restoreConfigSnapshots(journal); err != nil {
 		return fmt.Errorf("恢复配置应用事务失败: %w", err)
 	}
@@ -202,7 +250,8 @@ func recoverConfigApply(ctx context.Context, options Options) error {
 			return fmt.Errorf("恢复配置后重新加载旧运行时失败: %w", err)
 		}
 	}
-	return os.RemoveAll(directory)
+	transaction := configApplyTransaction{directory: directory, journalPath: filepath.Join(directory, "journal.json"), journal: journal}
+	return transaction.cleanup()
 }
 
 func validateConfigJournal(options Options, journal configApplyJournal) error {
@@ -240,9 +289,7 @@ func isSingBoxStaticPath(singBoxDir, path string) bool {
 func restoreConfigSnapshots(journal configApplyJournal) error {
 	var restoreErr error
 	for _, snapshot := range append(append([]configFileSnapshot{}, journal.Static...), journal.Runtime...) {
-		if err := configSnapshotRestore(snapshot); err != nil && restoreErr == nil {
-			restoreErr = err
-		}
+		restoreErr = errors.Join(restoreErr, configSnapshotRestore(snapshot))
 	}
 	return restoreErr
 }

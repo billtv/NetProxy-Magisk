@@ -16,7 +16,7 @@ func TestCatalogGroupQueries(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("import group: %v", err)
 	}
-	resolved, err := ResolveGroup(root, "本地配置")
+	resolved, err := ResolveGroup(context.Background(), root, "本地配置")
 	if err != nil || resolved != "local-test" {
 		t.Fatalf("resolve group: %q, %v", resolved, err)
 	}
@@ -32,7 +32,7 @@ func TestCatalogGroupQueries(t *testing.T) {
 	if err != nil || !contains {
 		t.Fatalf("group contains tag: %v, %v", contains, err)
 	}
-	metadata, err := PrivateMetadata(root, resolved)
+	metadata, err := PrivateMetadata(context.Background(), root, resolved)
 	if err != nil || metadata.Name != "本地配置" || metadata.Type != "local" {
 		t.Fatalf("private metadata: %+v, %v", metadata, err)
 	}
@@ -43,7 +43,7 @@ func TestCatalogGroupQueries(t *testing.T) {
 
 func TestNewSubscriptionGroupID(t *testing.T) {
 	root := t.TempDir()
-	subscriptionID, err := NewSubscriptionGroupID(root)
+	subscriptionID, err := NewSubscriptionGroupID(context.Background(), root)
 	if err != nil || !validGroupID.MatchString(subscriptionID) {
 		t.Fatalf("subscription id: %q, %v", subscriptionID, err)
 	}
@@ -66,13 +66,13 @@ func TestReservedGroupIDsAreRejectedByDirectOperations(t *testing.T) {
 			if err := InitializeGroup(context.Background(), GroupOptions{Root: root, GroupID: groupID, Type: "local"}); err == nil {
 				t.Fatal("保留分组 ID 不应初始化成功")
 			}
-			if _, err := PrivateMetadata(root, groupID); err == nil {
+			if _, err := PrivateMetadata(context.Background(), root, groupID); err == nil {
 				t.Fatal("保留分组 ID 不应读取元数据")
 			}
-			if err := DeleteGroup(root, groupID); err == nil {
+			if err := DeleteGroup(context.Background(), root, groupID); err == nil {
 				t.Fatal("保留分组 ID 不应删除目录")
 			}
-			if _, err := ResolveGroup(root, groupID); err == nil {
+			if _, err := ResolveGroup(context.Background(), root, groupID); err == nil {
 				t.Fatal("保留目录不应解析为 Catalog 分组")
 			}
 		})

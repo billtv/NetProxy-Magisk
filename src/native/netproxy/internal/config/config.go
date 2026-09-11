@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/processlock"
 )
@@ -118,15 +118,43 @@ func LoadModule(path string) (ModuleConfig, error) {
 }
 
 // UpdateModule 更新并校验 module.conf，校验失败时不会替换原文件。
-func UpdateModule(path string, updates map[string]string) error {
-	return UpdateValidated(path, updates, func(candidate string) error {
+func UpdateModule(ctx context.Context, path string, updates map[string]string) error {
+	return UpdateValidated(ctx, path, updates, func(candidate string) error {
 		_, err := LoadModule(candidate)
 		return err
 	})
 }
 
 // UpdateValidated 使用候选文件完成校验后再原子替换原配置。
-func UpdateValidated(path string, updates map[string]string, validate func(string) error) error {
+func UpdateValidated(ctx context.Context, path string, updates map[string]string, validate func(string) error) error {
+	editor, err := Lock(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer editor.Release()
+	return editor.Update(updates, validate)
+}
+
+// Editor 在显式持有文件锁期间完成配置读改写。
+type Editor struct {
+	path string
+	*processlock.Lock
+}
+
+func Lock(ctx context.Context, path string) (*Editor, error) {
+	lock, err := processlock.Acquire(ctx, path+".lock")
+	if err != nil {
+		return nil, err
+	}
+	return &Editor{path: path, Lock: lock}, nil
+}
+
+func (editor *Editor) Update(updates map[string]string, validate func(string) error) error {
+	path := editor.path
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
 	if len(updates) == 0 {
 		return nil
 	}
@@ -140,16 +168,6 @@ func UpdateValidated(path string, updates map[string]string, validate func(strin
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	lock, err := acquireLock(path + ".lock")
-	if err != nil {
-		return err
-	}
-	defer lock.Release()
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
 	text := strings.ReplaceAll(string(content), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
@@ -258,18 +276,4 @@ func boolValue(values map[string]string, key string, fallback bool) (bool, error
 	default:
 		return false, fmt.Errorf("%s 必须为 0、1、true 或 false", key)
 	}
-}
-
-func acquireLock(path string) (*processlock.Lock, error) {
-	for range 50 {
-		lock, err := processlock.TryAcquire(path)
-		if err == nil {
-			return lock, nil
-		}
-		if !errors.Is(err, processlock.ErrBusy) {
-			return nil, err
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("配置文件正忙: %s", path)
 }

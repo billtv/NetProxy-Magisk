@@ -1,11 +1,68 @@
 package ebpf
 
 import (
+	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestPackageQueryPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := listPackageUIDs(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消变为其他错误: %v", err)
+	}
+}
+
+func TestPackageQueryStopsRunningCommand(t *testing.T) {
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "cmd")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", binary, "./testdata/fake-package")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("构建查询桩: %v %s", err, output)
+	}
+	started := filepath.Join(directory, "started")
+	t.Setenv("NETPROXY_PACKAGE_STARTED", started)
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := listPackageUIDs(ctx, 0); done <- err }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("查询未开始: %v", err)
+		case <-deadline:
+			t.Fatal("查询未启动")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("取消丢失: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("查询取消未停止进程")
+	}
+}
 
 func TestParsePackageUIDsAcceptsPackageRowsAndIgnoresOtherOutput(t *testing.T) {
 	got, err := parsePackageUIDs(strings.Join([]string{
