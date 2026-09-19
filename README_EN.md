@@ -10,17 +10,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/billtv/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/v/release/billtv/NetProxy-Magisk?style=flat-square&label=Release&color=blue" alt="Latest Release" />
+  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
+    <img src="https://img.shields.io/github/v/release/Fanju6/NetProxy-Magisk?style=flat-square&label=Release&color=blue" alt="Latest Release" />
   </a>
-  <a href="https://github.com/billtv/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/downloads/billtv/NetProxy-Magisk/total?style=flat-square&color=green" alt="Downloads" />
+  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
+    <img src="https://img.shields.io/github/downloads/Fanju6/NetProxy-Magisk/total?style=flat-square&color=green" alt="Downloads" />
   </a>
   <img src="https://img.shields.io/badge/Core-sing--box-blueviolet?style=flat-square" alt="sing-box Core" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/billtv/NetProxy-Magisk/releases">Releases</a> ·
+  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">Releases</a> ·
   <a href="https://www.netproxy.store/">Documentation</a> ·
   <a href="https://play.google.com/store/apps/details?id=com.fanjv.netproxy">Android Manager</a> ·
   <a href="src/android/">Manager Source</a> ·
@@ -35,7 +35,7 @@
 
 ## Overview
 
-NetProxy 8.0 is a system-wide transparent proxy module for rooted Android devices. Its embedded sing-box core captures local and shared-network traffic through eBPF and can be managed through the Android app, module WebUI, CLI, Service API Dashboard, or zashboard.
+NetProxy 8.0 is a system-wide transparent proxy module for rooted Android devices. Its embedded sing-box core captures local and shared-network traffic through eBPF and can be managed through the Android app, module WebUI, CLI, or Service API Dashboard.
 
 Supported root environments: **Magisk, KernelSU, and APatch**.
 
@@ -48,7 +48,7 @@ src/webui/           Module WebUI
 src/android/         Android Manager
 ```
 
-The Android Manager and module share the `schema=1` `netproxyctl` JSON contract while keeping separate local build workflows. Repository Actions build the module ZIP and a self-signed manager APK after upstream synchronization or main-branch pushes, and each Release keeps only those two assets. Google Play remains the recommended manager installation and update channel. See the [manager source](src/android/) for local build instructions.
+The Android Manager and module share the `schema=1` `netproxyctl` JSON contract while keeping separate local build workflows. Repository CI does not build or publish the manager; Google Play is the recommended installation and update channel. A module package with the manager APK is also available for devices without Google Play access. See the [manager source](src/android/) for local build instructions.
 
 ## Management
 
@@ -57,12 +57,11 @@ The Android Manager and module share the `schema=1` `netproxyctl` JSON contract 
 | [**Android Manager**](https://play.google.com/store/apps/details?id=com.fanjv.netproxy) ([source](src/android/)) | Service, nodes, subscriptions, per-app rules, configuration, and logs |
 | **Module WebUI** | Open the NetProxy portal from the KernelSU, Magisk, or APatch module page |
 | **CLI** | Terminal management, automation, and diagnostics |
-| **Clash API + zashboard** | Runtime groups, connections, delay tests, and mode control |
+| **Clash API** | Compatible third-party client access to runtime state and proxy groups |
 
 Default local endpoints:
 
 - Clash Controller: `http://127.0.0.1:9999`
-- zashboard: `http://127.0.0.1:9999/ui/`
 - sing-box Service API Dashboard: `http://127.0.0.1:9090/dashboard/`
 - Secret: `singbox`
 
@@ -84,28 +83,28 @@ Both APIs listen on loopback by default. LAN access requires an explicit listene
 - Manual selector and URLTest automatic selection
 - Rule, Global, Direct, and AllowAds modes
 - Wi-Fi SSID based switching between the configured mode and Direct
-- Clash API, zashboard, connection control, and delay tests
+- Clash API, connection control, and delay tests
 - Scheduled subscription updates and rule-set bypass
 - Automatic cleanup of eBPF programs, maps, and TC attachments
 
 ## Installation
 
-Each release provides exactly two assets:
+Each release provides two packages:
 
 | Package | Filename | Contents | Recommended for |
 |---------|----------|----------|-----------------|
-| **Module ZIP** | `NetProxy_<version>_<build>.zip` | sing-box, the NetProxy native component, zashboard, CLI, eBPF, and the module WebUI | Flash with Magisk, KernelSU, or APatch |
-| **Manager APK** | `NetProxyManager_<version>_<build>.apk` | Standalone Android Manager, built with a self-signed certificate | Manual installation when Google Play is unavailable |
+| **Standard** | `NetProxy_<version>_<build>.zip` | sing-box, the NetProxy native component, CLI, eBPF, and the module WebUI | The default choice when the manager is installed separately |
+| **With manager** | `NetProxy_<version>_<build>_with-manager.zip` | Everything in Standard plus the optional manager APK | Devices without Google Play or users who want to install the APK during module installation |
 
-The module ZIP does not contain the manager APK. CI generates a temporary self-signed certificate for each build, so an upgrade across builds may require confirmation of the signature change.
+Both packages have identical proxy capabilities. The manager APK is an independent release asset; normal Android builds do not overwrite it.
 
 > [!IMPORTANT]
 > The eBPF inbound requires kernel BPF, TC classifier, transparent socket, and socket lookup support. Local interception also requires veth and policy-routing capabilities. Unsupported kernels cannot start this version.
 
-1. Download the module ZIP from [Releases](https://github.com/billtv/NetProxy-Magisk/releases); download the APK separately when needed.
+1. Download the latest ZIP from [Releases](https://github.com/Fanju6/NetProxy-Magisk/releases).
 2. Flash it with Magisk, KernelSU, or APatch.
 3. On an existing installation, choose **Keep existing data** or **Fresh installation**. Timeout keeps existing data.
-4. Install the manager APK separately when needed; a Google Play installation may not accept an APK signed with a different certificate as an in-place upgrade.
+4. If the package includes an APK, choose whether to install it; otherwise install the manager from Google Play when available.
 5. A live installation is applied without a reboot. Recovery installation still requires a reboot.
 6. Import and select a node before starting the service.
 
@@ -258,7 +257,6 @@ See the [NetProxy documentation](https://www.netproxy.store/) for complete insta
 | [SagerNet/sing-box](https://github.com/SagerNet/sing-box) | Upstream sing-box project |
 | [Proxylink](https://github.com/Fanju6/Proxylink) | Original project behind NetProxy's internal node conversion support |
 | [AsteriskNG](https://github.com/Asterisk4Magisk/AsteriskNG) | Android eBPF implementation reference |
-| [zashboard](https://github.com/Zephyruso/zashboard) | Clash API dashboard |
 | [v2rayNG](https://github.com/2dust/v2rayNG) | Node parsing reference |
 
 ---
@@ -280,8 +278,8 @@ The following projects powered or inspired earlier NetProxy releases. Their cont
 - [Contributing guide](CONTRIBUTING.md)
 - [Architecture and coding agent guide](AGENTS.md)
 - [Telegram group](https://t.me/NetProxy_Magisk)
-- [Issues](https://github.com/billtv/NetProxy-Magisk/issues)
-- [Pull requests](https://github.com/billtv/NetProxy-Magisk/pulls)
+- [Issues](https://github.com/Fanju6/NetProxy-Magisk/issues)
+- [Pull requests](https://github.com/Fanju6/NetProxy-Magisk/pulls)
 
 ## License
 
@@ -289,4 +287,4 @@ The following projects powered or inspired earlier NetProxy releases. Their cont
 
 ## Star
 
-[![Star History Chart](https://star-history.dera.page/svg?repos=billtv/NetProxy-Magisk&type=date&legend=top-left)](https://star-history.dera.page/#billtv/NetProxy-Magisk&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Fanju6/NetProxy-Magisk&type=date&legend=top-left)](https://star-history.dera.page/#Fanju6/NetProxy-Magisk&type=date&legend=top-left)

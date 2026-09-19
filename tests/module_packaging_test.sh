@@ -44,6 +44,28 @@ assert_contains "$MANAGER_ACTION" 'apksigner'
   printf '%s\n' '模块目录仍包含已删除的 netproxy-native' >&2
   exit 1
 }
+find "$ROOT/src/module/webroot" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+  while IFS= read -r directory; do
+    case "$directory" in
+      netproxy|sing-box-dashboard) ;;
+      *)
+        printf '模块 Web 根目录包含未声明的面板资源: %s\n' "$directory" >&2
+        exit 1
+        ;;
+    esac
+  done
+[ -d "$ROOT/src/module/webroot/sing-box-dashboard" ] || {
+  printf '%s\n' '模块 Web 根目录缺少 sing-box Dashboard' >&2
+  exit 1
+}
+! grep -q '"external_ui"' "$ROOT/src/module/config/singbox/config.json" || {
+  printf '%s\n' '默认配置仍声明已删除的外部 UI' >&2
+  exit 1
+}
+! grep -q '"githubRelease"' "$ROOT/.github/resources.json" || {
+  printf '%s\n' '资源清单仍包含已删除的 GitHub Release 面板来源' >&2
+  exit 1
+}
 
 assert_contains "$RELEASE_WORKFLOW" 'needs: verify'
 assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/actions/build-module'
