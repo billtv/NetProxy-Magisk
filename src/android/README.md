@@ -5,10 +5,10 @@
 ## 获取应用
 
 - 推荐通过 [Google Play](https://play.google.com/store/apps/details?id=com.fanjv.netproxy) 安装和更新。
-- 仓库 Release 另提供独立的自签名管理器 APK，供无法使用 Google Play 的设备手动安装。
-- 模块 ZIP 不包含管理器 APK。
+- 含管理器模块包附带管理器 APK，供无法使用 Google Play 的设备安装。
+- 标准模块包不包含管理器 APK。
 
-CI 构建管理器 APK 时使用临时自签名证书，不会覆盖 `src/module/NetProxy.apk`；本地发布构建仍需通过环境变量提供签名材料。
+含管理器模块包中的 APK 由仓库 CI 从当前源码构建并临时签名，APK 本身不提交到仓库。每次 CI 运行使用不同签名，无法覆盖旧 CI 版；重新安装前需卸载旧版，卸载会清除管理器本地数据。仪表盘根据 APK 签名证书识别 Google Play 应用签名；其他签名会常驻显示测试版警告。
 
 ## 功能
 
@@ -47,7 +47,7 @@ src/android/
 app/src/main/java/com/fanjv/netproxy/
 ├── core/                 # 命令契约、依赖容器、模块路径和共享 UI
 ├── feature/              # dashboard、nodes、subscriptions 等功能域
-├── navigation/           # Navigation3 路由与主导航状态
+├── navigation/           # Miuix Nav 路由与主导航状态
 ├── MainActivity.kt       # Android 与 Compose 入口
 └── NetProxyApplication.kt
 ```
@@ -62,7 +62,7 @@ Compose UI -> ViewModel -> Repository -> NetProxyCtlClient -> netproxyctl
 
 ## 本地构建
 
-准备 Android SDK 37 和 JDK 21，然后从仓库根目录执行：
+准备 Android SDK 37 和 JDK 26，然后从仓库根目录执行：
 
 ```bash
 cd src/android
@@ -76,7 +76,7 @@ cd src/android
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-调试 APK 位于 `app/build/outputs/apk/debug/`。发布版本需要在本地提供签名材料，签名文件和密钥配置不得提交到仓库。
+调试 APK 位于 `app/build/outputs/apk/debug/`。本地 Release APK 未签名；正式 Google Play 发布由 Play 的正式签名链路负责。模块含管理器包由 CI 使用仅限单次运行的密钥签名，不需要仓库保存签名密钥。
 
 ## 第三方源码
 

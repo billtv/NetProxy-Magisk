@@ -19,17 +19,15 @@ fun gitCommitCount(): Int {
     }.getOrDefault(1)
 }
 
-// CI 使用临时自签名证书构建可安装的 Release APK；本地未提供这些变量时保持未签名构建。
-val releaseStoreFile = providers.environmentVariable("NETPROXY_RELEASE_STORE_FILE").orNull
-val releaseStorePassword = providers.environmentVariable("NETPROXY_RELEASE_STORE_PASSWORD").orNull
-val releaseKeyAlias = providers.environmentVariable("NETPROXY_RELEASE_KEY_ALIAS").orNull
-val releaseKeyPassword = providers.environmentVariable("NETPROXY_RELEASE_KEY_PASSWORD").orNull
-val hasCiSigning = listOf(
-    releaseStoreFile,
-    releaseStorePassword,
-    releaseKeyAlias,
-    releaseKeyPassword,
-).all { !it.isNullOrBlank() }
+val ciManagerBuild = providers.gradleProperty("netproxyManagerCi").orNull == "true"
+val managerVersion = providers.gradleProperty("netproxyManagerVersion").orNull
+    ?: rootProject.file("../module/module.prop").takeIf { it.isFile }?.useLines { lines ->
+        lines.firstOrNull { it.startsWith("version=") }
+            ?.substringAfter('=')
+            ?.removePrefix("v")
+    }
+    ?: "8.1.1"
+val managerBuildId = providers.gradleProperty("netproxyManagerBuildId").orNull ?: "local"
 
 android {
     namespace = "com.fanjv.netproxy"
@@ -37,34 +35,25 @@ android {
         version = release(37)
     }
 
-    defaultConfig {
-        applicationId = "com.fanjv.netproxy"
-        minSdk = 31
-        targetSdk = 37
-        versionCode = gitCommitCount()
-        versionName = "8.1.0"
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_26
+        targetCompatibility = JavaVersion.VERSION_26
     }
 
-    signingConfigs {
-        if (hasCiSigning) {
-            create("ciRelease") {
-                storeFile = file(checkNotNull(releaseStoreFile))
-                storePassword = checkNotNull(releaseStorePassword)
-                keyAlias = checkNotNull(releaseKeyAlias)
-                keyPassword = checkNotNull(releaseKeyPassword)
-            }
+    defaultConfig {
+        applicationId = "com.fanjv.netproxy"
+        minSdk = 26
+        targetSdk = 37
+        versionCode = gitCommitCount()
+        versionName = if (ciManagerBuild) "$managerVersion-ci.$managerBuildId" else managerVersion
+        ndk {
+            abiFilters += "arm64-v8a"
         }
     }
 
     buildTypes {
         release {
             optimization.enable = true
-            if (hasCiSigning) {
-                signingConfig = signingConfigs.getByName("ciRelease")
-            }
         }
     }
     buildFeatures {
@@ -101,6 +90,12 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26)
+    }
+}
+
 tasks.withType<Test>().configureEach {
     // Schema 测试直接读取磁盘文件，它们不在 JVM 测试类路径中，必须显式参与缓存键。
     inputs.file(layout.projectDirectory.file("src/main/assets/sing-box.schema.json"))
@@ -128,14 +123,12 @@ dependencies {
     // Miuix
     implementation(libs.miuix.ui)
     implementation(libs.miuix.icons)
-    implementation(libs.miuix.navigation3.ui)
+    implementation(libs.miuix.nav)
     implementation(libs.miuix.preference)
     implementation(libs.miuix.blur)
     implementation(libs.miuix.squircle)
     implementation(libs.scripta.editor)
-    implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigationevent.compose)
-    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.hiddenapibypass)
     testImplementation(libs.junit)

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # 文件: tests/module_packaging_test.sh
-# 功能: 验证标准模块 ZIP、独立管理器 APK 以及构建发布契约。
+# 功能: 验证两种模块包的内容差异以及构建、发布契约。
 # 用法: sh tests/module_packaging_test.sh
 # 依赖: POSIX sh、7z、grep、cmp、mktemp
 
@@ -8,9 +8,8 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 BUILD_ACTION="$ROOT/.github/actions/build-module/action.yml"
-MANAGER_ACTION="$ROOT/.github/actions/build-manager/action.yml"
-RELEASE_WORKFLOW="$ROOT/.github/workflows/build-release.yml"
-SYNC_WORKFLOW="$ROOT/.github/workflows/sync-upstream.yml"
+RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
+CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 VERIFY_SCRIPT="$ROOT/tests/ci_verify.sh"
 
 assert_contains() {
@@ -28,35 +27,74 @@ assert_not_contains() {
 }
 
 assert_contains "$BUILD_ACTION" 'standard_name=NetProxy_${VERSION}_${COMMIT_COUNT}.zip'
-assert_contains "$BUILD_ACTION" 'go build -v'
-assert_contains "$BUILD_ACTION" '7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"'
+assert_contains "$BUILD_ACTION" 'manager_name=NetProxy_${VERSION}_${COMMIT_COUNT}_with-manager.zip'
+assert_contains "$BUILD_ACTION" 'sh .github/scripts/package-module.sh'
+assert_contains "$BUILD_ACTION" 'sh tests/ci_verify.sh'
+assert_contains "$BUILD_ACTION" 'install -m 0755 "$NETPROXY_CI_BUILD_DIR/netproxyctl-android" src/module/bin/netproxyctl'
+assert_contains "$BUILD_ACTION" './gradlew :app:assembleRelease'
+assert_contains "$BUILD_ACTION" '-PnetproxyManagerCi=true'
+assert_contains "$BUILD_ACTION" 'keytool -genkeypair -noprompt'
+assert_contains "$BUILD_ACTION" 'GITHUB_RUN_ATTEMPT'
+assert_contains "$BUILD_ACTION" 'openssl rand -hex 24'
+assert_contains "$BUILD_ACTION" '-storetype PKCS12'
+assert_contains "$BUILD_ACTION" 'versionName='\''${MANAGER_VERSION}-ci.${BUILD_ID}'\'''
+assert_contains "$BUILD_ACTION" '--v4-signing-enabled false'
+assert_contains "$BUILD_ACTION" 'apksigner" verify --verbose'
+assert_contains "$BUILD_ACTION" 'install -m 0644 "$SIGNED_APK" src/module/NetProxy.apk'
+assert_contains "$ROOT/src/android/app/build.gradle.kts" 'versionName = if (ciManagerBuild)'
+assert_contains "$ROOT/src/android/app/src/main/java/com/fanjv/netproxy/core/app/AppSignature.kt" 'GOOGLE_PLAY_APP_SIGNING_SHA256'
+assert_contains "$ROOT/src/android/app/src/main/java/com/fanjv/netproxy/core/app/AppSignature.kt" 'signingCertificateHistory'
+assert_contains "$ROOT/.gitignore" 'src/module/NetProxy.apk'
 assert_contains "$VERIFY_SCRIPT" './cmd/netproxyctl'
 assert_contains "$VERIFY_SCRIPT" "-ldflags='-s -w -buildid='"
 assert_not_contains "$BUILD_ACTION" 'full_name|lite_name|_lite'
 assert_not_contains "$BUILD_ACTION" 'netproxy-native|cmd/netproxy-native'
-assert_not_contains "$BUILD_ACTION" 'manager_name|with-manager'
-
-assert_contains "$MANAGER_ACTION" 'apk_name:'
-assert_contains "$MANAGER_ACTION" ':app:assembleRelease'
-assert_contains "$MANAGER_ACTION" 'apksigner'
-
 [ ! -e "$ROOT/src/module/bin/netproxy-native" ] || {
   printf '%s\n' '模块目录仍包含已删除的 netproxy-native' >&2
   exit 1
 }
+find "$ROOT/src/module/webroot" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+  while IFS= read -r directory; do
+    case "$directory" in
+      netproxy|sing-box-dashboard) ;;
+      *)
+        printf '模块 Web 根目录包含未声明的面板资源: %s\n' "$directory" >&2
+        exit 1
+        ;;
+    esac
+  done
+[ -d "$ROOT/src/module/webroot/sing-box-dashboard" ] || {
+  printf '%s\n' '模块 Web 根目录缺少 sing-box Dashboard' >&2
+  exit 1
+}
+! grep -q '"external_ui"' "$ROOT/src/module/config/singbox/config.json" || {
+  printf '%s\n' '默认配置仍声明已删除的外部 UI' >&2
+  exit 1
+}
+! grep -q '"githubRelease"' "$ROOT/.github/resources.json" || {
+  printf '%s\n' '资源清单仍包含已删除的 GitHub Release 面板来源' >&2
+  exit 1
+}
 
-assert_contains "$RELEASE_WORKFLOW" 'needs: verify'
-assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/actions/build-module'
-assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/actions/build-manager'
 assert_contains "$RELEASE_WORKFLOW" 'STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}'
-assert_contains "$RELEASE_WORKFLOW" 'APK_NAME: ${{ steps.manager.outputs.apk_name }}'
-assert_contains "$RELEASE_WORKFLOW" '"$STANDARD_NAME"'
-assert_contains "$RELEASE_WORKFLOW" '"$APK_NAME"'
-assert_contains "$RELEASE_WORKFLOW" 'gh release upload'
-assert_not_contains "$RELEASE_WORKFLOW" 'manager_name|with-manager'
+assert_contains "$RELEASE_WORKFLOW" '${{ steps.pack.outputs.manager_name }}'
+assert_contains "$RELEASE_WORKFLOW" 'update.json'
+assert_contains "$RELEASE_WORKFLOW" 'extract-release-notes.mjs'
+assert_contains "$RELEASE_WORKFLOW" 'body_path: ${{ runner.temp }}/release-notes.md'
+assert_contains "$RELEASE_WORKFLOW" '[标准包]'
+assert_contains "$RELEASE_WORKFLOW" '[含管理器包]'
+assert_not_contains "$RELEASE_WORKFLOW" 'body_path:[[:space:]]*docs/changelog\.md'
 assert_not_contains "$RELEASE_WORKFLOW" 'full_name|lite_name|FULL_NAME|LITE_NAME'
 
-assert_contains "$SYNC_WORKFLOW" 'tests/module_packaging_test.sh'
+assert_contains "$CI_WORKFLOW" '${{ steps.pack.outputs.standard_name }}'
+assert_contains "$CI_WORKFLOW" '${{ steps.pack.outputs.manager_name }}'
+assert_contains "$CI_WORKFLOW" 'needs: [module, android]'
+assert_contains "$CI_WORKFLOW" "needs.module.result == 'success'"
+assert_contains "$CI_WORKFLOW" "needs.android.result == 'success' || needs.android.result == 'skipped'"
+assert_contains "$CI_WORKFLOW" 'compression-level: 0'
+assert_contains "$CI_WORKFLOW" '            src/module/config/singbox'
+assert_contains "$CI_WORKFLOW" '--target "$GITHUB_SHA"'
+assert_not_contains "$CI_WORKFLOW" 'full_name|lite_name'
 
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
