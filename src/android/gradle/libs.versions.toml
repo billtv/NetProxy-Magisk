@@ -1,12 +1,12 @@
 [versions]
 # Android & Kotlin
-agp = "9.3.2"
-kotlin = "2.4.10"
+agp = "9.4.1"
+kotlin = "2.4.20"
 kotlinxSerialization = "1.11.0"
 
 # AndroidX Core & Activity
 activityCompose = "1.13.0"
-coreKtx = "1.19.0"
+coreKtx = "1.19.1"
 lifecycleRuntimeKtx = "2.11.0"
 navigationevent = "1.1.2"
 
