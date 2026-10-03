@@ -35,7 +35,7 @@
 
 ## 项目简介
 
-NetProxy 8.0 是面向已 Root Android 设备的系统级透明代理模块。模块以内置 sing-box 为代理核心，通过 eBPF 接管本机及共享网络流量，并提供 Android 管理器、模块 WebUI、CLI 与 Service API Dashboard 等入口。
+NetProxy 是面向已 Root Android 设备的系统级透明代理模块。模块以内置 sing-box 为代理核心，通过 eBPF 接管本机及共享网络流量，并提供 Android 管理器、模块 WebUI、CLI 与 Service API Dashboard 等入口。
 
 支持 **Magisk、KernelSU 与 APatch**。节点、订阅、路由、DNS 和透明代理配置均保存在模块目录中，不依赖 VPN 模式运行。
 
@@ -102,8 +102,8 @@ Release 页面提供以下两个版本：
 
 1. 从 [Releases](https://github.com/Fanju6/NetProxy-Magisk/releases) 下载最新模块 ZIP。
 2. 在 Magisk、KernelSU 或 APatch 中刷入模块。
-3. 更新已有模块时，按安装提示选择“保留现有数据”或“全新安装”；超时默认保留现有数据。
-4. 含管理器包会提供随附 APK 的安装选项；标准包不显示该步骤。
+3. 更新已有模块时，可选择“保留现有数据”“仅保留节点与订阅”或“全新安装”；音量键加循环选择、音量键减确认，未操作时默认保留现有数据。
+4. 含管理器包会提供随附 APK 的安装选项；标准包会显示从 Google Play 安装管理器的提示。
 5. 已开机刷入会在后台应用新版本，无需重启；Recovery 刷入完成后需要重启设备。
 6. 导入并选择节点，再通过管理器、模块 WebUI 或 CLI 启动服务。
 
