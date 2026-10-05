@@ -66,7 +66,8 @@ src/module/emulated-soft-reboot.sh  # 仅 KernelSU 软重启前生命周期钩�
 
 - `src/native/netproxy` 是 Catalog、Provider、订阅事务、配置、eBPF 运行时、Service API 与 sing-box 生命周期的业务事实源；Shell 只负责模块 service 阶段进入 Go 的平台桥接。
 - 模块、配置、Catalog、运行时、日志、二进制与 `/dev/netproxy` 状态路径统一由 `internal/paths.Layout` 推导。生产代码不得自行拼接这些布局；测试和用户指定的导入、导出、临时路径仍可显式注入。
-- 允许且仅允许一个 Go Worker。它承载订阅调度和可选的 Android 网络监听，不能演变为通用控制守护进程、REST 服务或第二个代理核心。
+- 允许且仅允许一个 Go Worker。它承载订阅调度、可选的 Android 网络监听和设备统计，不能演变为通用控制守护进程、REST 服务或第二个代理核心。
+- 设备统计只从 Go 公共命令与真实核心启动采集 `module_active`、`service_start_result`，不增加 Android/WebUI SDK。Worker 以 Root 查询用户 0 的 `ANDROID_ID`，用固定 NetProxy 命名空间的 SHA-256 派生设备身份，每个 Worker 成功读取后只缓存在内存；读取失败不得回退随机身份。CLI 不查询设备标识，`config/telemetry/state.json` 只保存每日去重和有界队列，不进入编辑器、日志或诊断包；原始标识不得落盘或上传，Token 只由构建注入。损坏状态不得静默覆盖，系统查询和网络请求不得持有状态锁，上传不得阻塞业务命令。停服入口不得为统计重新启动 Worker，否则 KernelSU 软重启会重新挂载已清理的 eBPF。
 - 使用 reF1nd sing-box 的类型定义解析、生成和校验 Provider，不通过字符串替换拼接协议配置。
 - reF1nd 依赖版本必须与打包的 sing-box 内核兼容；升级时同时验证转换 fixtures、Provider 和 Service API。
 - Native JSON 编解码统一使用 Go 标准库 `encoding/json/v2` 与 `encoding/json/jsontext`，依赖严格字段匹配、重复键拒绝和 UTF-8 校验；持久文件与 `schema=1` 输出必须显式传入 `json.Deterministic(true)`，不要回退到 v1 或设置 `GOEXPERIMENT=nojsonv2`。
@@ -87,7 +88,7 @@ src/module/emulated-soft-reboot.sh  # 仅 KernelSU 软重启前生命周期钩�
 - Miuix Nav 是页面导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
 - 主分页底部导航由 `MainBottomBar` 单一实现统一承载；主题偏好不改变其结构或布局形态。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
-- 含管理器模块包的 `NetProxy.apk` 由独立 Android 任务通过共享 Action 从当前源码构建，并使用本次运行的临时密钥签名；不得提交或手工维护该生成物。标准包必须排除该 APK。
+- 含管理器模块包的 `NetProxy.apk` 由独立 Android 任务通过共享 Action 从当前源码构建，并使用 GitHub Secrets 中的固定密钥签名；不得提交签名材料或手工维护该生成物。标准包必须排除该 APK。
 
 ## WebUI
 
@@ -165,7 +166,7 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 - Service API 与 Clash API 使用主配置中 `services`、`experimental.clash_api` 的固定监听与密钥——改回运行时随机 bootstrap 会让 WebUI 连不上核心且无任何报错。
 - Android 依赖由 `AppContainer` 与 `NetProxyViewModelFactory` 手工构造——引入 Hilt/Koin 需先有全项目架构决策。
 - Provider 与 selector 的默认值必须落到 `Auto/<group>`——回退到 `direct` 会让用户以为已代理而实际直连。
-- CI 管理器 APK 每次使用不同签名，不能覆盖已安装的旧 CI 版；安装新版前必须卸载旧版，卸载会清除管理器本地数据。CI 构建在仪表盘服务状态卡片上方常驻显示警告；正式 Google Play 构建不带 CI 标记，因此不显示。
+- CI 与 Release 管理器 APK 使用同一固定签名；轮换密钥或改回临时签名会导致后续 APK 无法覆盖已安装版本。应用不按安装来源或签名证书限制使用，也不显示来源警告。
 - 订阅自定义请求头走 `--headers-file` 而非命令行参数——命令行对全系统可见（`/proc/<pid>/cmdline`），会泄露鉴权 token。
 - 订阅请求的默认 User-Agent 是 `sing-box`——多数机场按 UA 白名单返回 `Subscription-Userinfo`，改成自定义 UA 会拿到 200 但没有流量信息。
 - 新增此类条款时写故障现象，不写设计理由：现象能阻止下一次回退，理由不能。
@@ -195,7 +196,7 @@ WebUI ───────────┼─> netproxyctl ─> Go 业务层 ─
                          └─> schema=1 JSON 契约
 ```
 
-NetProxy 不维护通用独立控制守护进程。唯一长期 Go 进程是模块启动的 Worker，负责订阅调度、Android 网络事件和策略评估；`service.sh` 仅在模块 service 阶段通过 `su -c` 进入 Go，Go 负责 sing-box 生命周期、类型化配置、网络事务、Provider 与业务状态。
+NetProxy 不维护通用独立控制守护进程。唯一长期 Go 进程是模块启动的 Worker，负责订阅调度、Android 网络事件、策略评估和设备统计；`service.sh` 仅在模块 service 阶段通过 `su -c` 进入 Go，Go 负责 sing-box 生命周期、类型化配置、网络事务、Provider 与业务状态。
 
 ## 事实源
 
@@ -203,6 +204,7 @@ NetProxy 不维护通用独立控制守护进程。唯一长期 Go 进程是模�
 |---|---|---|
 | 模块版本 | `src/module/module.prop` | `versionCode` 由打包工作流写入 |
 | 模块设置 | `src/module/config/module.conf` | 保存活动分组、选择模式和出站模式 |
+| 设备统计队列 | `config/telemetry/state.json` | 每日去重和离线队列；设备身份由 Worker 从系统派生，不作为用户配置展示 |
 | eBPF 设置 | `src/module/config/ebpf/ebpf.conf` | 由运行时生成 sing-box eBPF inbound |
 | 节点与订阅 | `src/module/data/catalog/<group-id>/` | `meta.json` + `provider.json` |
 | sing-box 静态配置 | `src/module/config/singbox/config.json` | 单一主配置，支持整份或按顶层字段编辑 |
@@ -366,13 +368,14 @@ Go 生命周期控制器通过 `-c config/singbox/config.json` 加载静态配�
 
 ## 构建与发布
 
-- CI 与 Release 共用 `build-module.yml` 的并行任务图；标准模块任务完成 Go/Shell 验证、`netproxyctl`、WebUI 与标准包，Android 任务构建并临时签名当前源码的 APK。发布任务仅汇合本次运行的产物并追加 APK，不重新编译。Android 源码变化必须触发模块重打包；任一构建或所需验证失败均不得发布。
+- CI 与 Release 共用 `build-module.yml` 的并行任务图；标准模块任务完成 Go/Shell 验证、`netproxyctl`、WebUI 与标准包，Android 任务构建并用固定密钥签名当前源码的 APK。发布任务仅汇合本次运行的产物并追加 APK，不重新编译。Android 源码变化必须触发模块重打包；任一构建或所需验证失败均不得发布。
 - CI 变更范围从同分支上次成功验证的提交计算，不能只比较本次 push：前一轮被取消或失败的改动仍须验证；基线不可用时执行全部检查。
 - 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。KernelSU 源码镜像仍须获取完整对象，不能套用部分克隆。
 - 标准包不包含 `NetProxy.apk`；文件名带 `_with-manager` 的包仅额外携带该 APK，代理能力保持一致。
 - 模块使用 ZIP 容器和 XZ 9 压缩；含管理器包复用标准包的压缩数据，以 Store 追加 APK。CI 上传归档时不再进行外层压缩。
-- Android 受影响时，CI 在管理器构建任务中使用同一次 Gradle 调用执行单元测试、Lint 与 Release 构建；仅需模块打包时仍构建当前管理器，不额外执行 Android 验证。资源维护复用纯验证模式，不构建 APK。Google Play 是推荐更新渠道，临时签名的 CI APK 为无 Play 环境保留。
+- Android 受影响时，CI 在管理器构建任务中使用同一次 Gradle 调用执行单元测试、Lint 与 Release 构建；仅需模块打包时仍构建当前管理器，不额外执行 Android 验证。资源维护复用纯验证模式，不构建 APK，也不需要签名密钥。固定签名由 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 四个 GitHub Secrets 注入；缺失时构建失败，不生成替代密钥。CI 版本名保留提交短哈希，仅用于区分构建。
 - `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；高风险或大版本更新进入报告，不自动静默升级。
+- Composite Action 的仓库 Variables 由调用工作流通过 inputs 显式传入；在 Action 清单中直接读取 `vars` 会导致 Runner 加载失败，尚未开始构建就退出。
 
 ## 安全边界
 
