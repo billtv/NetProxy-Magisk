@@ -5,15 +5,15 @@ description: 奶屁龙与奶屁娘各 16 张，透明 PNG 与奶屁龙 SVG 源�
 
 # 奶屁表情包
 
-只有两位角色：像素奶屁龙与长发奶屁娘，各 16 张，共 32 张。每张 PNG 为 512×512、透明背景，单张小于 512 KiB。点击图片查看原文件。
+奶屁龙与奶屁娘各有 16 张表情，共 32 张。每张 PNG 为 512×512、透明背景，单张小于 512 KiB。点击图片查看原文件。
 
 [下载全部 32 张 PNG](/mascots/naipi-stickers.zip) · [查看素材清单](/mascots/stickers.json)
 
-这是独立素材包，尚未替你创建 Telegram 贴纸集。可在 Telegram 的贴纸管理机器人中逐张上传 PNG，并设置对应表情；不要直接上传 SVG 或把整个 ZIP 当成一张贴纸。
+可在 Telegram 的贴纸管理机器人中逐张上传 PNG，并设置对应表情。
 
 ## 奶屁龙
 
-全部由纯 SVG 路径派生，保留像素风。对应 SVG 编辑源与 PNG 导出文件同名，位于 `dragon/stickers/`。
+表情由纯 SVG 路径派生，保留奶屁龙的像素风；对应编辑源与 PNG 文件同名，位于 `dragon/stickers/`。
 
 <div class="mascot-gallery">
 <figure><a href="/mascots/dragon/stickers/01-received.png"><img src="/mascots/dragon/stickers/01-received.png" alt="奶屁龙：收到" width="512" height="512" loading="lazy" /></a><figcaption>收到</figcaption></figure>
@@ -36,7 +36,7 @@ description: 奶屁龙与奶屁娘各 16 张，透明 PNG 与奶屁龙 SVG 源�
 
 ## 奶屁娘
 
-使用原长发形象，保留符合设定的表情并补绘新动作。表情中的“本小姐”是口气，不代表角色仍叫“奶屁大小姐”。
+长发奶屁娘收录了“本小姐出手”“日志呢？”与“优雅收工”等日常语气，也为她补绘了新的动作。
 
 <div class="mascot-gallery">
 <figure><a href="/mascots/niang/stickers/01-hmph.png"><img src="/mascots/niang/stickers/01-hmph.png" alt="奶屁娘：哼" width="512" height="512" loading="lazy" /></a><figcaption>哼</figcaption></figure>
@@ -57,6 +57,4 @@ description: 奶屁龙与奶屁娘各 16 张，透明 PNG 与奶屁龙 SVG 源�
 <figure><a href="/mascots/niang/stickers/16-leave-it.png"><img src="/mascots/niang/stickers/16-leave-it.png" alt="奶屁娘：交给我" width="512" height="512" loading="lazy" /></a><figcaption>交给我</figcaption></figure>
 </div>
 
-## 继续创作
-
-先阅读[创作规范](./production)。保留形象可以扩展动作；增加一套表情不等于增加一位角色。旧短发人物和非像素龙的素材不属于本套。
+更多动作和表情的创作方式见[创作规范](./production)。

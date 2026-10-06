@@ -82,10 +82,28 @@ for (const [index, [slug, caption]] of niang.entries()) {
 }
 write('stickers.json', JSON.stringify(entries, null, 2) + '\n')
 
-const openFace = '<style>#eye-left,#eye-right,#mouth{display:none}</style>'
-write('dragon/sleep.svg', frame(openFace + body + face('sleep'), '奶屁龙休息表情', '225 206 966 848'))
-write('dragon/failed.svg', frame(openFace + body + face('surprised') + path('M870 290h24v56h-24zM870 365h24v24h-24z', '#d65368'), '奶屁龙失败表情', '225 206 966 848'))
-write('dragon/ready.svg', frame(`<style>#paw-left,#paw-right{animation:dig 2s steps(1,end) infinite}#paw-right{animation-delay:-1s}@keyframes dig{0%,70%,100%{transform:translateY(0)}35%{transform:translateY(8px)}}@media(prefers-reduced-motion:reduce){#paw-left,#paw-right{animation:none}}</style>${body}`, '奶屁龙动作结构样张', '225 206 966 848'))
+const faceUnderlay = body.match(/<g id="face-underlay"[^>]*>[\s\S]*?<\/g>/)?.[0] ?? ''
+const wood = '#d6a866'
+const toolHandle = points => points.map(([x, y]) => rect(x, y, 24, 24, ink) + rect(x + 4, y + 4, 16, 16, wood)).join('')
+const toolHead = (x, y) => path(`M${x} ${y}h76v16h16v20h-28v-8h-52v8h-28v-20h16z`, ink) + path(`M${x + 4} ${y + 4}h68v12h16v8h-24v-8h-52v8h-24v-8h16z`, blue)
+const zMark = (x, y) => path(`M${x} ${y}h48v16h-20v16h-16v16h36v16h-48V48h20V32h16V16h-36z`, blue)
+const alertMark = (x, y) => rect(x, y, 24, 56, '#d65368') + rect(x, y + 76, 24, 24, '#d65368')
+const waitingDots = count => Array.from({ length: count }, (_, index) => rect(838 + index * 28, 302, 16, 16, blue)).join('')
+const diggingRaised = faceUnderlay + face('happy')
+  + toolHandle([[281, 682], [297, 706], [313, 730], [329, 754], [345, 778], [361, 802]])
+  + toolHead(241, 650)
+const diggingStrike = faceUnderlay + face('happy')
+  + toolHandle([[361, 802], [337, 826], [313, 850], [289, 874], [265, 898]])
+  + toolHead(225, 902)
+  + path('M272 950h28v16h-28zM316 966h40v16h-40zM376 950h24v16h-24z', blue)
+write('dragon/dig-raised.svg', frame(diggingRaised, '奶屁龙开挖抬镐', '225 206 966 848'))
+write('dragon/dig-strike.svg', frame(diggingStrike, '奶屁龙开挖落镐', '225 206 966 848'))
+write('dragon/sleep-a.svg', frame(faceUnderlay + face('sleep') + zMark(854, 304), '奶屁龙打呼噜', '225 206 966 848'))
+write('dragon/sleep-b.svg', frame(faceUnderlay + face('sleep') + zMark(838, 326) + zMark(878, 266), '奶屁龙打呼噜冒泡', '225 206 966 848'))
+write('dragon/failed-a.svg', frame(alertMark(870, 290), '奶屁龙异常提醒', '225 206 966 848'))
+write('dragon/failed-b.svg', frame(alertMark(890, 270) + rect(850, 294, 16, 16, '#d65368') + rect(938, 294, 16, 16, '#d65368'), '奶屁龙异常提醒闪烁', '225 206 966 848'))
+write('dragon/waiting-a.svg', frame(waitingDots(1), '奶屁龙等待中', '225 206 966 848'))
+write('dragon/waiting-b.svg', frame(waitingDots(3), '奶屁龙等待中提示', '225 206 966 848'))
 
 const torso = path('M15 3h12v2h5v3h4v3h3v4h2v9h-3v3h-2v9h-3v3H11v-3H8V27H5V24H3v-9h2v-4h3V8h4V5h3z')
   + path('M15 5h12v2h5v3h4v5h3v9h-3v3h-2v9h-3v1H13v-1h-3v-9H7v-3H5v-9h2v-5h5V7h3z', mint)

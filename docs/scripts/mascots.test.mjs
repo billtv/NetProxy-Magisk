@@ -38,8 +38,12 @@ describe('奶屁角色素材契约', () => {
     }
   })
 
-  it('动作样张有减少动画处理，文档 HTML 素材链接真实存在', () => {
-    expect(readFileSync(`${root}/dragon/ready.svg`, 'utf8')).toContain('prefers-reduced-motion:reduce')
+  it('运行态样张保持完整静态图形，文档 HTML 素材链接真实存在', () => {
+    for (const state of ['dig-raised', 'dig-strike', 'sleep-a', 'sleep-b', 'failed-a', 'failed-b', 'waiting-a', 'waiting-b']) {
+      const svg = readFileSync(`${root}/dragon/${state}.svg`, 'utf8')
+      expect(svg).not.toContain('@keyframes')
+      expect(svg).not.toContain('animation:')
+    }
     for (const page of ['index', 'dragon', 'niang', 'stickers', 'production']) {
       const markdown = readFileSync(resolve(import.meta.dirname, `../mascot/${page}.md`), 'utf8')
       for (const match of markdown.matchAll(/(?:src|href|data)="\/mascots\/([^"#?]+)"/g)) {
