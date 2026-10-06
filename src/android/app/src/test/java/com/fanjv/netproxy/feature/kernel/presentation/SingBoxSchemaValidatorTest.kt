@@ -11,7 +11,9 @@ import org.junit.Test
 import java.io.File
 
 class SingBoxSchemaValidatorTest {
-    private val validator = SingBoxSchemaValidator(TEST_SCHEMA)
+    private fun validator(schema: String) = SingBoxSchemaValidator({ schema }, localizedSchemaText("zh"))
+
+    private val validator = validator(TEST_SCHEMA)
 
     @Test
     fun validDocumentPassesDeclaredSchema() = runBlocking {
@@ -44,7 +46,7 @@ class SingBoxSchemaValidatorTest {
 
     @Test
     fun branchValidationReturnsTheSelectedProtocolFieldError() = runBlocking {
-        val branchValidator = SingBoxSchemaValidator(BRANCH_SCHEMA)
+        val branchValidator = validator(BRANCH_SCHEMA)
 
         val result = branchValidator.validate(
             """
@@ -65,7 +67,7 @@ class SingBoxSchemaValidatorTest {
 
     @Test
     fun durationPatternRequiresUnitsAndAllowsCompoundValues() = runBlocking {
-        val durationValidator = SingBoxSchemaValidator(DURATION_SCHEMA)
+        val durationValidator = validator(DURATION_SCHEMA)
 
         assertEquals(
             SingBoxSchemaValidationResult.Valid,
@@ -79,12 +81,112 @@ class SingBoxSchemaValidatorTest {
     }
 
     @Test
+    fun h3VersionConstraintOnlyAppliesWhenCongestionControlIsPresent() = runBlocking {
+        val conditionalValidator = validator(
+            """
+                {
+                  "type": "object",
+                  "allOf": [
+                    {
+                      "if": { "required": ["h3_congestion_control"] },
+                      "then": {
+                        "properties": {
+                          "version": {
+                            "anyOf": [
+                              { "type": "integer", "const": 3 },
+                              { "type": "array", "contains": { "const": 3 } }
+                            ]
+                          }
+                        },
+                        "required": ["version"]
+                      }
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        listOf(
+            "{}",
+            """{"version":2}""",
+            """{"version":3,"h3_congestion_control":"bbr"}""",
+            """{"version":[2,3],"h3_congestion_control":"bbr"}""",
+        ).forEach { document ->
+            assertEquals(document, SingBoxSchemaValidationResult.Valid, conditionalValidator.validate(document))
+        }
+        listOf("2", "[1,2]", "[]").forEach { version ->
+            val result = conditionalValidator.validate(
+                """{"version":$version,"h3_congestion_control":"bbr"}""",
+            ) as SingBoxSchemaValidationResult.Invalid
+            assertEquals("/version", result.issues.single().instancePath)
+        }
+        assertTrue(
+            conditionalValidator.validate("""{"h3_congestion_control":"bbr"}""")
+                is SingBoxSchemaValidationResult.Invalid,
+        )
+    }
+
+    @Test
+    fun containsValidatesReferencedSchemaEvenWithoutItems() = runBlocking {
+        val containsValidator = validator(
+            """
+                {
+                  "type": "array",
+                  "contains": { "${'$'}ref": "#/${'$'}defs/H3" },
+                  "${'$'}defs": { "H3": { "const": 3 } }
+                }
+            """.trimIndent(),
+        )
+
+        assertEquals(SingBoxSchemaValidationResult.Valid, containsValidator.validate("[2,3]"))
+        listOf("[]", "[1,2]", "[\"3\"]").forEach { document ->
+            val result = containsValidator.validate(document) as SingBoxSchemaValidationResult.Invalid
+            assertEquals(document, "", result.issues.single().instancePath)
+        }
+    }
+
+    @Test
+    fun containsDoesNotSkipItemValidation() = runBlocking {
+        val containsValidator = validator(
+            """{"type":"array","items":{"type":"integer"},"contains":{"const":3}}""",
+        )
+
+        assertEquals(SingBoxSchemaValidationResult.Valid, containsValidator.validate("[2,3]"))
+        val invalidItem = containsValidator.validate("[3,\"bad\"]") as SingBoxSchemaValidationResult.Invalid
+        assertEquals("/1", invalidItem.issues.single().instancePath)
+    }
+
+    @Test
+    fun conditionalBranchTracksEvaluatedProperties() = runBlocking {
+        val conditionalValidator = validator(
+            """
+                {
+                  "type": "object",
+                  "properties": { "enabled": { "type": "boolean" } },
+                  "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+                  "then": { "properties": { "version": { "const": 3 } } },
+                  "unevaluatedProperties": false
+                }
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            SingBoxSchemaValidationResult.Valid,
+            conditionalValidator.validate("""{"enabled":true,"version":3}"""),
+        )
+        val inactive = conditionalValidator.validate("""{"enabled":false,"version":3}""")
+            as SingBoxSchemaValidationResult.Invalid
+        assertEquals("/version", inactive.issues.single().instancePath)
+        assertTrue(inactive.issues.single().message.contains("不允许字段"))
+    }
+
+    @Test
     fun bundledSchemaSelectsLogicalDnsRuleByDiscriminator() = runBlocking {
         val schemaFile = sequenceOf(
             File("src/main/assets/sing-box.schema.json"),
             File("app/src/main/assets/sing-box.schema.json"),
         ).first(File::isFile)
-        val bundledValidator = SingBoxSchemaValidator(schemaFile.readText())
+        val bundledValidator = validator(schemaFile.readText())
 
         assertEquals(
             SingBoxSchemaValidationResult.Valid,
@@ -127,7 +229,7 @@ class SingBoxSchemaValidatorTest {
 
     @Test
     fun allOfTracksEvaluatedPropertiesBeforeRejectingUnknownField() = runBlocking {
-        val branchValidator = SingBoxSchemaValidator(BRANCH_SCHEMA)
+        val branchValidator = validator(BRANCH_SCHEMA)
 
         val result = branchValidator.validate(
             """
@@ -179,7 +281,7 @@ class SingBoxSchemaValidatorTest {
 
     @Test
     fun anyOfAndPropertyNamesValidateTheirSelectedBranch() = runBlocking {
-        val branchValidator = SingBoxSchemaValidator(BRANCH_SCHEMA)
+        val branchValidator = validator(BRANCH_SCHEMA)
 
         val result = branchValidator.validate(
             """
@@ -204,7 +306,7 @@ class SingBoxSchemaValidatorTest {
             File("src/main/assets/sing-box.schema.json"),
             File("app/src/main/assets/sing-box.schema.json"),
         ).first(File::isFile)
-        val bundledValidator = SingBoxSchemaValidator(schemaFile.readText())
+        val bundledValidator = validator(schemaFile.readText())
         val result = bundledValidator.validate(
             """
                 {
@@ -231,7 +333,7 @@ class SingBoxSchemaValidatorTest {
             File("src/main/assets/sing-box.schema.json"),
             File("app/src/main/assets/sing-box.schema.json"),
         ).first(File::isFile)
-        val bundledValidator = SingBoxSchemaValidator(schemaFile.readText())
+        val bundledValidator = validator(schemaFile.readText())
 
         assertEquals(
             SingBoxSchemaValidationResult.Valid,
@@ -304,7 +406,7 @@ class SingBoxSchemaValidatorTest {
             File("src/main/assets/sing-box.schema.json"),
             File("app/src/main/assets/sing-box.schema.json"),
         ).first(File::isFile)
-        val bundledValidator = SingBoxSchemaValidator(schemaFile.readText())
+        val bundledValidator = validator(schemaFile.readText())
         val result = bundledValidator.validate(
             """
                 {
@@ -339,7 +441,8 @@ class SingBoxSchemaValidatorTest {
         ).first(File::isFile)
         val schema = singBoxSchemaJson.parseToJsonElement(schemaFile.readText()).jsonObject
 
-        assertTrue((schema.validationKeywords() - SUPPORTED_SCHEMA_KEYWORDS).isEmpty())
+        val unsupported = schema.validationKeywords() - SUPPORTED_SCHEMA_KEYWORDS
+        assertTrue("Schema 包含未实现的校验关键字：$unsupported", unsupported.isEmpty())
     }
 
     @Test
@@ -353,7 +456,7 @@ class SingBoxSchemaValidatorTest {
             File("../../module/config/singbox/config.json"),
             File("src/module/config/singbox/config.json"),
         ).first(File::isFile)
-        val validator = SingBoxSchemaValidator(schemaFile.readText())
+        val validator = validator(schemaFile.readText())
 
         val config = singBoxSchemaJson.parseToJsonElement(configFile.readText()).jsonObject
         val documents = listOf(config) + config.map { (key, value) -> JsonObject(mapOf(key to value)) }
@@ -488,6 +591,9 @@ private val SUPPORTED_SCHEMA_KEYWORDS = setOf(
     "maximum",
     "pattern",
     "propertyNames",
+    "if",
+    "then",
+    "contains",
 )
 
 private fun JsonObject.validationKeywords(): Set<String> {
@@ -498,10 +604,8 @@ private fun JsonObject.validationKeywords(): Set<String> {
         keywords += schema.keys.intersect(SUPPORTED_SCHEMA_KEYWORDS + UNSUPPORTED_SCHEMA_KEYWORDS)
         schema["properties"].asSchemaObject()?.values?.forEach { it.collect() }
         schema["\$defs"].asSchemaObject()?.values?.forEach { it.collect() }
-        schema["items"]?.collect()
-        schema["propertyNames"]?.collect()
-        schema["additionalProperties"]?.collect()
-        schema["unevaluatedProperties"]?.collect()
+        listOf("items", "propertyNames", "additionalProperties", "unevaluatedProperties", "if", "then", "else", "contains")
+            .forEach { key -> schema[key]?.collect() }
         listOf("oneOf", "anyOf", "allOf").forEach { key ->
             (schema[key] as? JsonArray).orEmpty().forEach { it.collect() }
         }
@@ -515,8 +619,6 @@ private fun JsonElement?.asSchemaObject(): JsonObject? = this as? JsonObject
 
 private val UNSUPPORTED_SCHEMA_KEYWORDS = setOf(
     "not",
-    "if",
-    "then",
     "else",
     "dependentRequired",
     "dependentSchemas",
@@ -524,7 +626,6 @@ private val UNSUPPORTED_SCHEMA_KEYWORDS = setOf(
     "minProperties",
     "maxProperties",
     "prefixItems",
-    "contains",
     "minContains",
     "maxContains",
     "minItems",
