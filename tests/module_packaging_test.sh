@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # 文件: tests/module_packaging_test.sh
-# 功能: 验证标准模块 ZIP、独立管理器 APK 以及构建发布契约。
+# 功能: 验证内置管理器的模块 ZIP、独立 APK 以及构建发布契约。
 # 用法: sh tests/module_packaging_test.sh
 # 依赖: POSIX sh、7z、grep、cmp、mktemp
 
@@ -53,6 +53,8 @@ assert_contains "$MANAGER_ACTION" '"$apksigner" sign'
 assert_contains "$RELEASE_WORKFLOW" 'needs: verify'
 assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/actions/build-module'
 assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/actions/build-manager'
+assert_contains "$RELEASE_WORKFLOW" 'sh .github/scripts/complete-module.sh "$STANDARD_NAME" "$bundle_dir/NetProxy.apk"'
+assert_contains "$RELEASE_WORKFLOW" 'sh tests/module_install_test.sh "$STANDARD_NAME" "$APK_NAME"'
 assert_contains "$RELEASE_WORKFLOW" 'STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}'
 assert_contains "$RELEASE_WORKFLOW" 'APK_NAME: ${{ steps.manager.outputs.apk_name }}'
 assert_contains "$RELEASE_WORKFLOW" '"$STANDARD_NAME"'
@@ -62,10 +64,18 @@ assert_not_contains "$RELEASE_WORKFLOW" 'manager_name|with-manager'
 assert_not_contains "$RELEASE_WORKFLOW" 'full_name|lite_name|FULL_NAME|LITE_NAME'
 
 assert_contains "$SYNC_WORKFLOW" 'tests/module_packaging_test.sh'
+assert_contains "$SYNC_WORKFLOW" 'tests/module_install_test.sh'
 
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 mkdir -p "$TEMP/module/config/singbox" "$TEMP/module/runtime" "$TEMP/module/bin"
+mkdir -p "$TEMP/module/config/ebpf" "$TEMP/module/data/catalog/default"
+for file in customize.sh netproxyctl service.sh action.sh uninstall.sh \
+  config/module.conf config/ebpf/ebpf.conf \
+  data/catalog/default/meta.json data/catalog/default/provider.json; do
+  cp "$ROOT/src/module/$file" "$TEMP/module/$file"
+done
+printf 'core fixture\n' > "$TEMP/module/bin/sing-box"
 printf 'id=netproxy\nversion=test\n' > "$TEMP/module/module.prop"
 fixture_line=0
 while [ "$fixture_line" -lt 256 ]; do
@@ -91,6 +101,21 @@ done
 assert_not_contains "$TEMP/standard.list" '^Path = NetProxy[.]apk$'
 if sh "$ROOT/.github/scripts/package-module.sh" "$TEMP/module" "$TEMP/output" standard.zip >/dev/null 2>&1; then
   printf '%s\n' '打包程序不应复用已有输出归档' >&2
+  exit 1
+fi
+
+if sh "$ROOT/tests/module_install_test.sh" "$TEMP/output/standard.zip" "$TEMP/module/NetProxy.apk" > "$TEMP/install.log" 2>&1; then
+  printf '%s\n' '缺少管理器的模块 ZIP 不应通过安装检查' >&2
+  exit 1
+fi
+assert_contains "$TEMP/install.log" '安装包或权限检查失败'
+sh "$ROOT/.github/scripts/complete-module.sh" "$TEMP/output/standard.zip" "$TEMP/module/NetProxy.apk" > "$TEMP/complete.log"
+7z x -so "$TEMP/output/standard.zip" NetProxy.apk > "$TEMP/extracted"
+cmp "$TEMP/module/NetProxy.apk" "$TEMP/extracted"
+sh "$ROOT/tests/module_install_test.sh" "$TEMP/output/standard.zip" "$TEMP/module/NetProxy.apk"
+printf 'different manager\n' > "$TEMP/different.apk"
+if sh "$ROOT/tests/module_install_test.sh" "$TEMP/output/standard.zip" "$TEMP/different.apk" > "$TEMP/install.log" 2>&1; then
+  printf '%s\n' '模块随附 APK 与独立资产不一致时不应通过检查' >&2
   exit 1
 fi
 

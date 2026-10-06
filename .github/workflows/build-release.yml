@@ -82,13 +82,26 @@ jobs:
           echo "SHORT_HASH=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           echo "COMMIT_MESSAGE=$(git log -1 --format=%s "$GITHUB_SHA")" >> "$GITHUB_ENV"
 
-      - name: 构建标准模块 ZIP
+      - name: 构建模块内容 ZIP
         id: pack
         uses: ./.github/actions/build-module
 
       - name: 构建自签名管理器 APK
         id: manager
         uses: ./.github/actions/build-manager
+
+      - name: 汇合并检查模块 ZIP
+        env:
+          STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}
+          APK_NAME: ${{ steps.manager.outputs.apk_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$(mktemp -d "$RUNNER_TEMP/netproxy-bundle.XXXXXX")"
+          trap 'rm -rf "$bundle_dir"' EXIT
+          install -m 0644 "$APK_NAME" "$bundle_dir/NetProxy.apk"
+          sh .github/scripts/complete-module.sh "$STANDARD_NAME" "$bundle_dir/NetProxy.apk"
+          sh tests/module_install_test.sh "$STANDARD_NAME" "$APK_NAME"
 
       - name: 发布模块 ZIP 与管理器 APK
         env:

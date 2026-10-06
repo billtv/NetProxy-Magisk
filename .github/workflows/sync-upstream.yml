@@ -106,7 +106,8 @@ jobs:
             .github/workflows/build-release.yml \
             .github/workflows/sync-upstream.yml \
             .github/actions \
-            tests/module_packaging_test.sh
+            tests/module_packaging_test.sh \
+            tests/module_install_test.sh
 
           # 无论上游是否新增了工作流，最终只保留本仓库定义的两条流程。
           while IFS= read -r workflow; do
