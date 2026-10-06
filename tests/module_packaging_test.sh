@@ -43,7 +43,7 @@ assert_not_contains "$BUILD_ACTION" 'manager_name|with-manager'
 
 assert_contains "$MANAGER_ACTION" 'apk_name:'
 assert_contains "$MANAGER_ACTION" ':app:assembleRelease'
-assert_contains "$MANAGER_ACTION" 'apksigner'
+assert_contains "$MANAGER_ACTION" '"$apksigner" sign'
 
 [ ! -e "$ROOT/src/module/bin/netproxy-native" ] || {
   printf '%s\n' '模块目录仍包含已删除的 netproxy-native' >&2

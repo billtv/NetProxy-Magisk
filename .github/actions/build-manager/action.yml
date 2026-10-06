@@ -59,30 +59,40 @@ runs:
     - name: 构建 Release APK
       working-directory: src/android
       shell: bash
+      run: ./gradlew :app:assembleRelease --no-daemon
+
+    - name: 签名并校验 APK
+      id: meta
+      shell: bash
       env:
         NETPROXY_RELEASE_STORE_FILE: ${{ steps.signing.outputs.keystore }}
         NETPROXY_RELEASE_STORE_PASSWORD: ${{ steps.signing.outputs.password }}
-        NETPROXY_RELEASE_KEY_ALIAS: netproxy-manager
-        NETPROXY_RELEASE_KEY_PASSWORD: ${{ steps.signing.outputs.password }}
-      run: ./gradlew :app:assembleRelease --no-daemon
-
-    - name: 整理并校验 APK
-      id: meta
-      shell: bash
       run: |
         set -euo pipefail
 
         version="$(sed -n 's/^version=//p' src/module/module.prop | head -n 1)"
         commit_count="$(git rev-list --count HEAD)"
-        source="src/android/app/build/outputs/apk/release/app-release.apk"
+        source="src/android/app/build/outputs/apk/release/app-release-unsigned.apk"
         apk_name="NetProxyManager_${version}_${commit_count}.apk"
 
         test -s "$source"
-        install -m 0644 "$source" "$apk_name"
 
         sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is unavailable}}"
         apksigner="$(find "$sdk_root/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
         test -x "$apksigner"
+        zipalign="$(dirname "$apksigner")/zipalign"
+        test -x "$zipalign"
+        aligned="$RUNNER_TEMP/netproxy-manager-aligned.apk"
+
+        "$zipalign" -P 16 -f 4 "$source" "$aligned"
+        "$apksigner" sign \
+          --ks "$NETPROXY_RELEASE_STORE_FILE" \
+          --ks-key-alias netproxy-manager \
+          --ks-pass env:NETPROXY_RELEASE_STORE_PASSWORD \
+          --key-pass env:NETPROXY_RELEASE_STORE_PASSWORD \
+          --out "$apk_name" \
+          "$aligned"
+        chmod 0644 "$apk_name"
         "$apksigner" verify --verbose --print-certs "$apk_name"
 
         sha256="$(sha256sum "$apk_name" | cut -d ' ' -f 1)"
