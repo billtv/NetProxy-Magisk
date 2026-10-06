@@ -29,9 +29,14 @@ assert_not_contains() {
 
 assert_contains "$BUILD_ACTION" 'standard_name=NetProxy_${VERSION}_${COMMIT_COUNT}.zip'
 assert_contains "$BUILD_ACTION" 'go build -v'
-assert_contains "$BUILD_ACTION" '7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"'
+assert_contains "$BUILD_ACTION" 'sh .github/scripts/package-module.sh src/module . "$STANDARD_NAME"'
 assert_contains "$VERIFY_SCRIPT" './cmd/netproxyctl'
-assert_contains "$VERIFY_SCRIPT" "-ldflags='-s -w -buildid='"
+for script in "$BUILD_ACTION" "$VERIFY_SCRIPT"; do
+  grep -Eq -- "-ldflags=['\"]-s -w -buildid=([ '\"])" "$script" || {
+    printf '缺少发行链接参数: %s\n' "$script" >&2
+    exit 1
+  }
+done
 assert_not_contains "$BUILD_ACTION" 'full_name|lite_name|_lite'
 assert_not_contains "$BUILD_ACTION" 'netproxy-native|cmd/netproxy-native'
 assert_not_contains "$BUILD_ACTION" 'manager_name|with-manager'
@@ -62,26 +67,29 @@ TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 mkdir -p "$TEMP/module/config/singbox" "$TEMP/module/runtime" "$TEMP/module/bin"
 printf 'id=netproxy\nversion=test\n' > "$TEMP/module/module.prop"
-printf 'binary fixture\n' > "$TEMP/module/bin/netproxyctl"
+fixture_line=0
+while [ "$fixture_line" -lt 256 ]; do
+  printf 'binary fixture\n'
+  fixture_line=$((fixture_line + 1))
+done > "$TEMP/module/bin/netproxyctl"
 printf '{}\n' > "$TEMP/module/config/singbox/config.json"
 printf 'manager fixture\n' > "$TEMP/module/NetProxy.apk"
 : > "$TEMP/module/runtime/.gitkeep"
 
-sh "$ROOT/.github/scripts/package-module.sh" "$TEMP/module" "$TEMP/output" standard.zip manager.zip > "$TEMP/package.log"
-for name in standard manager; do
-  7z l -slt "$TEMP/output/$name.zip" | tr '\\' '/' > "$TEMP/$name.list"
-  assert_contains "$TEMP/$name.list" 'Path = module.prop'
-  assert_contains "$TEMP/$name.list" 'Path = runtime/.gitkeep'
-  for file in module.prop bin/netproxyctl config/singbox/config.json; do
-    7z x -so "$TEMP/output/$name.zip" "$file" > "$TEMP/extracted"
-    cmp "$TEMP/module/$file" "$TEMP/extracted"
-  done
+sh "$ROOT/.github/scripts/package-module.sh" "$TEMP/module" "$TEMP/output" standard.zip > "$TEMP/package.log"
+7z l -slt "$TEMP/output/standard.zip" | tr '\\' '/' > "$TEMP/standard.list"
+assert_contains "$TEMP/standard.list" 'Path = module.prop'
+assert_contains "$TEMP/standard.list" 'Path = runtime/.gitkeep'
+grep -iq '^Method = xz$' "$TEMP/standard.list" || {
+  printf '%s\n' '模块内容未使用 XZ 压缩' >&2
+  exit 1
+}
+for file in module.prop bin/netproxyctl config/singbox/config.json; do
+  7z x -so "$TEMP/output/standard.zip" "$file" > "$TEMP/extracted"
+  cmp "$TEMP/module/$file" "$TEMP/extracted"
 done
 assert_not_contains "$TEMP/standard.list" '^Path = NetProxy[.]apk$'
-assert_contains "$TEMP/manager.list" 'Path = NetProxy.apk'
-7z x -so "$TEMP/output/manager.zip" NetProxy.apk > "$TEMP/extracted"
-cmp "$TEMP/module/NetProxy.apk" "$TEMP/extracted"
-if sh "$ROOT/.github/scripts/package-module.sh" "$TEMP/module" "$TEMP/output" standard.zip manager.zip >/dev/null 2>&1; then
+if sh "$ROOT/.github/scripts/package-module.sh" "$TEMP/module" "$TEMP/output" standard.zip >/dev/null 2>&1; then
   printf '%s\n' '打包程序不应复用已有输出归档' >&2
   exit 1
 fi

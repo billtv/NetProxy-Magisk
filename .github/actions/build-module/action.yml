@@ -76,9 +76,8 @@ runs:
 
     - name: 打包标准模块
       shell: bash
-      working-directory: src/module
       env:
         STANDARD_NAME: ${{ steps.meta.outputs.standard_name }}
       run: |
         # 管理器 APK 作为独立 Release 资产发布，标准模块包不内置该 APK。
-        7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"
+        sh .github/scripts/package-module.sh src/module . "$STANDARD_NAME"
