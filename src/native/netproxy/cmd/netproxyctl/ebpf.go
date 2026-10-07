@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/ebpf"
 	"os"
+
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 )
 
 func (c *cli) ebpf(ctx context.Context, args []string) error {
@@ -26,22 +27,40 @@ func (c *cli) ebpf(ctx context.Context, args []string) error {
 				return usageError("用法: netproxyctl ebpf status [configured|all|local|shared] [--raw]")
 			}
 		}
-		options, err := ebpf.ResolveProbeOptions(c.options.EBPFConfig, mode)
+		config, err := inbound.Load(c.options.InboundConfig)
+		if err != nil {
+			return err
+		}
+		native, err := config.EBPFOptions()
+		if err != nil {
+			return err
+		}
+		options, err := inbound.ResolveProbeOptions(native, mode)
 		if err != nil {
 			return &resultError{Code: "ebpf.status_failed", Message: err.Error()}
 		}
-		probeOutput, probeErr := ebpf.RunProbe(ctx, c.options.SingBoxPath, options)
-		report, parseErr := ebpf.ParseProbeReport(probeOutput)
+		probeOutput, probeErr := inbound.RunProbe(ctx, c.options.SingBoxPath, native, mode)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		report, parseErr := inbound.ParseProbeReport(probeOutput)
 		if parseErr != nil {
+			content := "无法读取 eBPF 诊断报告，请检查内核版本与核心日志。"
+			if probeErr != nil {
+				content = "eBPF 诊断命令未能完成，请检查核心文件与 Root 权限。\n" + probeErr.Error()
+			}
+			if raw {
+				content = probeOutput
+			}
 			return &resultError{
 				Code:    "ebpf.status_invalid",
 				Message: parseErr.Error(),
-				Data:    map[string]any{"raw": raw, "content": probeOutput},
+				Data:    map[string]any{"raw": raw, "content": content},
 			}
 		}
 		content := probeOutput
 		if !raw {
-			content = ebpf.FormatProbeOutput(report, probeErr)
+			content = inbound.FormatProbeOutput(report, probeErr)
 		}
 		data := map[string]any{
 			"mode":    options.RequestedMode,
@@ -49,7 +68,7 @@ func (c *cli) ebpf(ctx context.Context, args []string) error {
 			"content": content,
 			"report":  report,
 		}
-		if probeErr != nil {
+		if probeErr != nil || report.Result != "preflight_passed" {
 			return &resultError{Code: "ebpf.unsupported", Message: "eBPF 能力检查未通过", Data: data}
 		}
 		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "ebpf.status", Message: "eBPF 能力检查完成", Data: data})

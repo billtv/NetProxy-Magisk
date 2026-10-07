@@ -33,7 +33,7 @@ runtime/           # 启动时生成的运行时配置
 - `http_clients`：HTTP Client 设置。
 - `services`：Service API 与 Dashboard。
 
-运行时节点 Provider、Auto / Select / Proxy 选择器和 eBPF 入站由 Native 组件生成，不应在主配置中重复定义。主配置可以增加独立命名的自定义出站和[策略分组](./policy-groups)。
+运行时节点 Provider、Auto / Select / Proxy 选择器和受管透明代理入站由 Native 组件生成，不应在主配置中重复定义。主配置可添加 mixed、HTTP 等其他入站，但不能额外定义受管 eBPF/TUN 或占用 `netproxy-in`；冲突会明确报错。主配置可以增加独立命名的自定义出站和[策略分组](./policy-groups)。
 
 ### 默认配置来源
 
@@ -43,13 +43,13 @@ runtime/           # 启动时生成的运行时配置
 
 - 日志、缓存、Dashboard 与规则文件使用模块目录。
 - mixed 入站和两个 API 仅监听本机，端口保持 `7080`、`9999`（Clash）与 `9090`（Service）。
-- 不复制上游的示例 Provider、出站和 eBPF 入站，继续由 Catalog 与 `ebpf.conf` 生成。eBPF 的启用路径、数据平面、应用与热点策略按用户设置生效。
+- 不复制上游的示例 Provider、出站和 eBPF 入站，继续由 Catalog 与 `config/inbound/inbound.json` 生成。只输出选中的 eBPF 或 TUN，应用与接口策略按所选后端的原生语义生效。
 
-远程规则使用 `geosite/` 与 `geoip/` 标签，内置文件放在 `rules/remote/geosite/` 与 `rules/remote/geoip/`。保留个人主配置时不会自动替换其规则标签；如需采用新默认规则，应同时更新主配置、`EBPF_LOCAL_BYPASS_RULE_SET` 与 `EBPF_SHARED_BYPASS_RULE_SET`，默认绕过标签均为 `geoip/cn`。
+远程规则使用 `geosite/` 与 `geoip/` 标签，内置文件放在 `rules/remote/geosite/` 与 `rules/remote/geoip/`。保留个人主配置时不会自动替换其规则标签；如需采用新默认规则，应同时更新主配置和入站 `ebpf.local.bypass_rule_set`、`ebpf.shared.bypass_rule_set`，默认绕过标签均为 `geoip/cn`。TUN 的接管/绕过规则集按其原生字段单独配置。
 
 ### 在管理器中编辑
 
-进入“设置 → 内核设置”，可以分别打开 DNS、入站、路由等分区，也可以打开“完整配置”。分区是主配置的编辑视图，不是另一个磁盘文件。
+进入“设置 → 内核配置”，在“主配置”中分别打开 DNS、入站、路由等分区，也可以打开“完整配置”。分区是主配置的编辑视图，不是另一个磁盘文件。
 
 DNS 编辑器只显示 `{"dns": {...}}`。保存时 Go 只替换 `dns`，其他分区保持不变；不能在 DNS 编辑器中写入 `route` 等其他顶层字段。将内容改为 `{}` 会删除该分区，`null` 与删除不是一回事。
 
@@ -57,11 +57,15 @@ DNS 编辑器只显示 `{"dns": {...}}`。保存时 Go 只替换 `dns`，其他�
 
 ### 更换整份配置
 
-先备份 `config.json`，再通过“完整配置”或 `config apply singbox/config.json` 提交候选文件。校验时会一起加载 Catalog 与 eBPF 运行时，失败不替换当前配置。
+先备份 `config.json`，再通过“完整配置”或 CLI 提交候选文件。校验时会一起加载 Catalog 与当前选中入站运行时，失败不替换当前配置。
+
+```sh
+su -c '/data/adb/modules/netproxy/netproxyctl config apply --revision <读到的revision> singbox/config.json /sdcard/candidate.json'
+```
 
 上游通用配置不能保证直接可用：需要保留 NetProxy 的控制 API，避免与自动生成的出站和入站重复，并确认规则路径相对于 `config/singbox/` 有效。`rules/` 不会内嵌到主配置中。
 
-安装选择“保留现有数据”时保留用户主配置，不用包内默认值覆盖它。安装器不转换旧配置格式；从片段目录布局升级时，先导出节点、记录订阅与个人设置，再选择“全新安装”，之后按当前格式重新配置。
+安装选择“保留现有数据”时保留用户主配置，不用包内默认值覆盖它。安装器不检测或转换旧配置格式；缺少当前入站文件或主配置时明确失败，请主动选择“仅保留节点与订阅”或“全新安装”，之后按当前格式重新配置。
 
 ## 规则集
 
@@ -84,9 +88,9 @@ DNS 编辑器只显示 `{"dns": {...}}`。保存时 Go 只替换 `dns`，其他�
 
 - `runtime/providers.json`
 - `runtime/outbounds.json`
-- `runtime/ebpf.json`
+- `runtime/inbound.json`
 
-这些文件可以帮助排障，但会随 Catalog、选择状态和 eBPF 设置重新生成，不应直接编辑。
+这些文件可以帮助排障，但会随 Catalog、选择状态和入站设置重新生成，不应直接编辑或在安装时保留。入站文件始终只包含当前所选的一个受管入站。
 
 ## 临时运行状态
 
@@ -119,4 +123,4 @@ DNS 编辑器只显示 `{"dns": {...}}`。保存时 Go 只替换 `dns`，其他�
 su -c '/data/adb/modules/netproxy/netproxyctl config check'
 ```
 
-管理器配置编辑器会先写候选文件，再执行 sing-box 检查和原子替换。不要手动修改 `runtime/`；需要调整 sing-box 行为时，应使用管理器内核设置或 `netproxyctl config` 的事务入口。
+管理器配置编辑器会先写候选文件，再执行 sing-box 检查和原子替换。不要手动修改 `runtime/`；需要调整 sing-box 行为时，应使用管理器内核配置或 `netproxyctl config` 的事务入口。
