@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
@@ -37,16 +37,15 @@ type ConfigDocument struct {
 
 var ErrConfigConflict = errors.New("配置已被修改，请重新加载后再保存")
 
-var configSections = map[string]bool{
-	"log": true, "experimental": true, "dns": true, "inbounds": true,
-	"route": true, "http_clients": true, "services": true, "outbounds": true,
-	"providers": false, "endpoints": false, "ntp": false,
-	"certificate": false, "certificate_providers": false, "network_namespaces": false,
+var configSections = []string{
+	"log", "dns", "ntp", "certificate", "certificate_providers",
+	"http_clients", "network_namespaces", "endpoints", "inbounds", "outbounds",
+	"providers", "route", "services", "experimental",
 }
 
 func configSection(target string) string {
 	section, hasPrefix := strings.CutPrefix(target, "singbox/")
-	if _, exists := configSections[section]; hasPrefix && exists {
+	if hasPrefix && slices.Contains(configSections, section) {
 		return section
 	}
 	return ""
@@ -60,13 +59,7 @@ func ListConfigs(options Options) ([]ConfigDocument, error) {
 	result := make([]ConfigDocument, 0)
 	if _, err := os.Stat(paths.SingBoxConfig(options.SingBoxDir)); err == nil {
 		result = append(result, ConfigDocument{ID: "singbox/config.json", Filename: "config.json", Category: "config", Editable: true})
-		// 主配置损坏时仍提供完整编辑入口，避免用户无法打开文件进行修复。
-		content, _ := os.ReadFile(paths.SingBoxConfig(options.SingBoxDir))
-		object, _ := configObject(content)
-		for section, alwaysListed := range configSections {
-			if _, exists := object[section]; !alwaysListed && !exists {
-				continue
-			}
+		for _, section := range configSections {
 			result = append(result, ConfigDocument{ID: "singbox/" + section, Filename: section, Category: "config", Editable: true, Section: section})
 		}
 	} else if !os.IsNotExist(err) {
@@ -87,7 +80,7 @@ func ListConfigs(options Options) ([]ConfigDocument, error) {
 			Editable: true,
 		})
 	}
-	for _, name := range []string{"providers.json", "outbounds.json", "ebpf.json"} {
+	for _, name := range []string{"ebpf.json", "outbounds.json", "providers.json"} {
 		path := filepath.Join(options.RuntimeDir, name)
 		info, err := os.Stat(path)
 		if os.IsNotExist(err) {
@@ -103,7 +96,6 @@ func ListConfigs(options Options) ([]ConfigDocument, error) {
 			ID: "runtime/" + name, Filename: name, Category: "runtime", Editable: false,
 		})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
 
