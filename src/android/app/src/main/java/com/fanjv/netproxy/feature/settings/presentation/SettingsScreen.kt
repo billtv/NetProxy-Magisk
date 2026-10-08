@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Router
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -128,6 +129,17 @@ internal fun SettingsScreen(
                                 onClick = { navigator.push(Route.NetworkMatching) }
                             )
                         },
+                        CardItem("routing") {
+                            ArrowPreference(
+                                title = stringResource(R.string.routing_rules),
+                                summary = stringResource(R.string.routing_rules_summary),
+                                startAction = {
+                                    Icon(Icons.AutoMirrored.Rounded.AltRoute, contentDescription = null,
+                                        modifier = Modifier.padding(end = 6.dp), tint = colorScheme.onBackground)
+                                },
+                                onClick = { navigator.push(Route.RoutingRules) }
+                            )
+                        },
                         CardItem("kernel") {
                             ArrowPreference(
                                 title = stringResource(R.string.kernel_settings),
@@ -163,7 +175,7 @@ internal fun SettingsScreen(
                                     )
                                 },
                                 checked = settings.autoStartEnabled,
-                                enabled = settings.hasLoaded && !settings.isLoading && !settings.isSaving,
+                                enabled = settings.hasLoaded,
                                 onCheckedChange = { viewModel.setAutoStartEnabled(it) }
                             )
                         },
