@@ -24,6 +24,7 @@
 - `__internal` 只允许 `boot` 与 `worker start|stop|run` 这类进程生命周期入口。Catalog、节点、订阅、配置、eBPF、Service API 和服务操作必须由公共命令直接调用 Go 领域处理器，不得重新建立内部命令转发层。
 - 机器接口固定使用 `schema=1` JSON。stdout 只能包含结果 JSON，日志与诊断写 stderr；字段、错误码或状态语义变化必须同步检查 Shell、Go、Android、WebUI 和测试。
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
+- 核心日志使用原生 `log.output=stderr`（省略时同样使用内核默认 stderr），Go 将 stdout/stderr 绑定同一个 `0600` 追加文件句柄并禁用颜色；不得让内核另开日志文件或使用随 CLI 退出的管道采集。核心退出后才允许在下次启动前轮转，清空必须截断当前 inode 并删除备份，不能重命名运行中的日志，否则继承句柄会继续写入不可见文件。
 - Catalog 是持久节点事实源：每组使用 `data/catalog/<group-id>/meta.json` 与 `provider.json`。`staging/` 只存事务临时文件，不得作为持久状态读取。
 - 节点选择只持久化 `ACTIVE_GROUP_ID` 与 `SELECTED_NODE_TAG`：空 tag 使用同组 Auto，非空 tag 手动选择。模式、节点引用和运行时标签由这两项派生，不读取旧选择字段或增加迁移逻辑。
 - 用户选节点按生命周期锁、配置文件锁串行保存和应用；启动与重载只同步已保存选择，不再次调用用户保存入口。选择器 API 仅对临时通信或服务错误在总时限内重试，遵循请求取消；最终失败返回 `node.runtime_sync_failed` 并保留已保存选择，不重载兜底；Catalog 结构变化显式重载。
@@ -118,6 +119,12 @@ src/module/service.sh
 - 日志、历史和诊断包必须复用统一脱敏逻辑；修复问题时使用匿名 fixture，不把用户提供的真实链接写入测试。
 - 不手工修改 `src/module/bin/` 下的 `netproxyctl`、`sing-box`，也不手工修改 WebUI 构建目录或工作流生成的版本号。更新二进制和资源时使用对应构建/更新流程并核对来源。
 
+## 本地开发资料
+
+- 本地技能、方案、报告、验证产物与独立缓存统一放入 Git 忽略的 `.agents/`，不再创建仓库根级 `.tmp/` 或 `.codex/`；技能保持 `.agents/skills/` 的发现路径，工具安装记录 `skills-lock.json` 保留工具规定的位置。
+- `plans/` 保存待执行方案，`reports/` 保存结论，`runs/<日期>-<任务>-<标识>/` 保存日志、构建产物和证据；脚本使用独立运行目录，禁止多个任务覆盖同一套产物。历史资料只作证据，不取代本文件或当前源码。
+- `cache/` 只存可重建缓存；`assets/` 保存原稿与参考资料，不得自动清理。归档源码副本、设备证据及无法确认用途的文件须保留，清理前逐项确认；签名材料和访问密钥不放入此目录。工具原生的 `build/`、`node_modules/` 等生成目录不迁移。
+
 ## 验证
 
 每次改动至少运行 `git diff --check`，并按影响范围执行：
@@ -129,9 +136,10 @@ src/module/service.sh
 (cd src/native/netproxy && go test ./... && go vet ./...)
 
 # Shell/Catalog 契约（先准备 netproxyctl 测试二进制）
-mkdir -p .tmp
-(cd src/native/netproxy && go build -o ../../../.tmp/netproxyctl ./cmd/netproxyctl)
-sh tests/runtime_catalog_test.sh ./.tmp/netproxyctl
+CHECK_DIR="$(pwd)/.agents/runs/manual-$$"
+mkdir -p "$CHECK_DIR"
+(cd src/native/netproxy && go build -o "$CHECK_DIR/netproxyctl" ./cmd/netproxyctl)
+sh tests/runtime_catalog_test.sh "$CHECK_DIR/netproxyctl"
 sh tests/module_scripts_test.sh
 sh tests/customize_hot_update_test.sh
 
