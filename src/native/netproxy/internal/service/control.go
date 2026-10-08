@@ -147,9 +147,9 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 		OutboundMode:           unknownOutboundMode,
 		ConfiguredOutboundMode: modes.Mode,
 		AvailableOutboundModes: modes.Available,
-		SelectorMode:           module.SelectorMode,
+		SelectorMode:           module.Mode(),
 		ActiveGroupID:          module.ActiveGroupID,
-		SelectedNodeRef:        module.SelectedNodeRef,
+		SelectedNodeRef:        module.Ref(),
 		CPUCount:               1,
 		WorkerState:            "stopped",
 	}
@@ -270,50 +270,22 @@ func ReadSelection(ctx context.Context, options Options) (Selection, error) {
 // ReadSnapshot 读取持久化节点并尽力合并运行时 Service API 状态。
 func ReadSnapshot(ctx context.Context, options Options, groupID string) (Snapshot, error) {
 	options = normalizeOptions(options)
+	groupID = strings.TrimSpace(groupID)
 	module := readModuleConfig(options.ModuleConfig)
-	allGroups, err := readNodes(ctx, options, module, "", true)
+	groups, err := readNodes(ctx, options, module, groupID, true)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	selectionGroups := groups
+	if groupID != "" && (len(groups) != 1 || groups[0].Group.ID != module.ActiveGroupID) {
+		selectionGroups, err = readNodes(ctx, options, module, "", false)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
 	runtimeGroups, _ := readRuntimeGroups(ctx, options)
-	selection := selectionFromRuntimeGroups(module, allGroups, runtimeGroups)
-	groups := allGroups
-	if strings.TrimSpace(groupID) != "" {
-		resolved, resolveErr := resolveSnapshotGroup(allGroups, groupID)
-		if resolveErr != nil {
-			return Snapshot{}, resolveErr
-		}
-		groups = groups[:0]
-		for _, candidate := range allGroups {
-			if candidate.Group.ID == resolved {
-				groups = append(groups, candidate)
-				break
-			}
-		}
-	}
+	selection := selectionFromRuntimeGroups(module, selectionGroups, runtimeGroups)
 	return Snapshot{Groups: groups, Selection: selection, RuntimeGroups: runtimeGroups}, nil
-}
-
-func resolveSnapshotGroup(groups []catalog.GroupSnapshot, query string) (string, error) {
-	for _, group := range groups {
-		if group.Group.ID == query {
-			return group.Group.ID, nil
-		}
-	}
-	match := ""
-	for _, group := range groups {
-		if group.Group.Name != query {
-			continue
-		}
-		if match != "" {
-			return "", fmt.Errorf("分组名称不唯一: %s", query)
-		}
-		match = group.Group.ID
-	}
-	if match == "" {
-		return "", fmt.Errorf("分组不存在: %s", query)
-	}
-	return match, nil
 }
 
 // ReadMode 读取主配置模式，并在核心运行时补充当前 Service API 模式。
@@ -625,8 +597,8 @@ func readModuleConfig(path string) moduleconfig.ModuleConfig {
 func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catalog.GroupSnapshot, runtimeGroups []serviceapi.Group) Selection {
 	selection := Selection{
 		ActiveGroupID:   module.ActiveGroupID,
-		SelectorMode:    module.SelectorMode,
-		SelectedNodeRef: module.SelectedNodeRef,
+		SelectorMode:    module.Mode(),
+		SelectedNodeRef: module.Ref(),
 	}
 	for _, group := range groups {
 		if group.Group.ID != module.ActiveGroupID {
@@ -637,7 +609,7 @@ func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catal
 		selection.ActiveGroupNodeCount = group.Group.NodeCount
 		if group.Group.NodeCount == 0 {
 			selection.Selected = ""
-		} else if module.SelectorMode == "urltest" {
+		} else if module.SelectedNodeTag == "" {
 			selection.Selected = "Auto/" + group.Group.RuntimeTag
 		} else {
 			selection.Selected = selection.SelectedNodeRef
@@ -648,10 +620,7 @@ func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catal
 		selection.ActiveGroupName = module.ActiveGroupID
 	}
 	if selection.ActiveGroupRuntimeTag != "" {
-		runtimeGroup := "Auto/" + selection.ActiveGroupRuntimeTag
-		if module.SelectorMode == "manual" {
-			runtimeGroup = "Select/" + selection.ActiveGroupRuntimeTag
-		}
+		runtimeGroup, _ := module.Selection.RuntimeTargets(selection.ActiveGroupRuntimeTag)
 		for _, group := range runtimeGroups {
 			if group.Tag == runtimeGroup {
 				selection.RuntimeSelected = group.Selected
@@ -795,8 +764,8 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 	activeID := module.ActiveGroupID
 	if target == "" {
 		group = activeID
-		if module.SelectorMode == "manual" {
-			return runtimeNodeDelayRequest(ctx, options.CatalogRoot, module.SelectedNodeRef)
+		if module.SelectedNodeTag != "" {
+			return runtimeNodeDelayRequest(ctx, options.CatalogRoot, module.Ref())
 		}
 		target = "auto"
 	}

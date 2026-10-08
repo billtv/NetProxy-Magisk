@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
-	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
@@ -33,13 +33,9 @@ const (
 )
 
 var (
-	workerProcessRunning   = isProcessRunning
-	workerProcessPID       = isWorkerProcessPID
-	workerVerifyRuntime    = verifyRuntimeState
-	workerLoadModule       = moduleconfig.LoadModule
-	workerUpdateModule     = moduleconfig.UpdateModule
-	workerGroupHasNodes    = catalog.GroupHasNodes
-	workerGroupContainsTag = catalog.GroupContainsTag
+	workerProcessRunning = isProcessRunning
+	workerProcessPID     = isWorkerProcessPID
+	workerVerifyRuntime  = verifyRuntimeState
 )
 
 // logWorker 按 Native 统一事件格式写入 Worker 日志。
@@ -76,7 +72,7 @@ type Options struct {
 	// PersistedBeforeUpdate 表示订阅编辑已保存设置，更新失败时不得误报为未保存。
 	PersistedBeforeUpdate   bool
 	NetworkWatchEnabled     bool
-	ReloadService           func(context.Context) error
+	SyncCatalog             func(context.Context, string, bool) (string, bool, error)
 	NetworkEvaluate         func(context.Context, string, string) error
 	NetworkEventSource      NetworkEventSource
 	NetworkStateReader      NetworkStateReader
@@ -92,10 +88,14 @@ type Options struct {
 
 // Summary 是一次调度轮次的结果。
 type Summary struct {
-	Updated      []string `json:"updated"`
-	Failed       []string `json:"failed"`
-	Nearest      int64    `json:"nearest"`
-	failureKinds []workerFailureKind
+	Updated []string `json:"updated"`
+	Failed  []string `json:"failed"`
+	Nearest int64    `json:"nearest"`
+}
+
+type subscriptionRetry struct {
+	attempt int
+	epoch   int64
 }
 
 type workerFailureKind uint8
@@ -171,42 +171,26 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 
 	logWorker(logger, "INFO", "worker.run", "started", "后台 Worker 已启动")
 	consecutiveFailures := 0
-	retryGroups := make(map[string]struct{})
+	retries := make(map[string]subscriptionRetry)
 	for {
 		now := options.Now()
-		summary, err := RunDue(ctx, options, now, logger)
+		_, err := runDue(ctx, options, now, logger, retries)
+		var nearest int64
+		if err == nil {
+			now = options.Now()
+			var schedule catalog.ScheduleResult
+			schedule, err = subscriptionSchedule(ctx, options.Root, now.Unix(), retries)
+			nearest = schedule.Nearest
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
 		if err != nil {
 			logWorker(logger, "ERROR", "subscription.schedule", "failed", "读取订阅调度失败: %v", err)
-		}
-		if err == nil {
-			for _, groupID := range summary.Updated {
-				delete(retryGroups, groupID)
-			}
-			for _, groupID := range summary.Failed {
-				retryGroups[groupID] = struct{}{}
-			}
-			updateRetryGroups(ctx, options, now, logger, retryGroups, &summary)
-		}
-		failure := err != nil || len(summary.Failed) > 0
-		var retryDelay time.Duration
-		if failure {
 			consecutiveFailures++
-			retryDelay = workerRetryDelay(consecutiveFailures, summary.failureKind(err))
+			nearest = now.Unix() + int64(workerRetryDelay(consecutiveFailures, classifyWorkerError(err))/time.Second)
 		} else {
 			consecutiveFailures = 0
-		}
-		var nearest int64
-		if failure {
-			nearest = now.Unix() + int64(retryDelay/time.Second)
-		} else {
-			nearest, err = nextUpdate(ctx, options.Root, now.Unix())
-			if err != nil {
-				logWorker(logger, "ERROR", "subscription.schedule", "failed", "计算下一次订阅更新时间失败: %v", err)
-				consecutiveFailures++
-				retryDelay = workerRetryDelay(consecutiveFailures, classifyWorkerError(err))
-				nearest = now.Unix() + int64(retryDelay/time.Second)
-				failure = true
-			}
 		}
 		if nearest == 0 && !networkWatchEnabled && options.Telemetry == nil {
 			logWorker(logger, "INFO", "worker.run", "stopped", "没有启用自动更新的订阅，Worker 退出")
@@ -216,9 +200,6 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 			nearest = now.Unix() + int64((24*time.Hour)/time.Second)
 		}
 		delay := time.Duration(nearest-now.Unix()) * time.Second
-		if failure && retryDelay > 0 {
-			delay = retryDelay
-		}
 		if delay < time.Second {
 			delay = time.Second
 		}
@@ -234,10 +215,8 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 				if options.Telemetry != nil {
 					options.Telemetry.Notify()
 				}
-				if !failure {
-					stopTimer(timer)
-					break wait
-				}
+				stopTimer(timer)
+				break wait
 			case <-timer.C():
 				break wait
 			}
@@ -245,37 +224,33 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 	}
 }
 
-func updateRetryGroups(ctx context.Context, options Options, now time.Time, logger *log.Logger, retryGroups map[string]struct{}, summary *Summary) {
-	if summary == nil || len(retryGroups) == 0 {
-		return
+func subscriptionSchedule(ctx context.Context, root string, now int64, retries map[string]subscriptionRetry) (catalog.ScheduleResult, error) {
+	schedule, err := catalog.Schedule(ctx, root, now)
+	if err != nil {
+		return schedule, err
 	}
-	attempted := make(map[string]struct{}, len(summary.Updated)+len(summary.Failed))
-	for _, groupID := range summary.Updated {
-		attempted[groupID] = struct{}{}
-	}
-	for _, groupID := range summary.Failed {
-		attempted[groupID] = struct{}{}
-	}
-	for groupID := range retryGroups {
-		if _, ok := attempted[groupID]; ok {
-			continue
+	for groupID := range retries {
+		if _, enabled := schedule.NextByGroup[groupID]; !enabled {
+			delete(retries, groupID)
 		}
-		if err := ctx.Err(); err != nil {
-			return
-		}
-		_, updateErr := UpdateGroup(ctx, options, groupID, now, logger)
-		if updateErr != nil {
-			summary.Failed = append(summary.Failed, groupID)
-			summary.failureKinds = append(summary.failureKinds, classifyWorkerError(updateErr))
-			if logger != nil {
-				logWorker(logger, "WARN", "subscription.update", "failed", "订阅退避重试失败: %s: %v", groupID, updateErr)
-			}
-			continue
-		}
-		summary.Updated = append(summary.Updated, groupID)
-		logWorker(logger, "INFO", "subscription.update", "success", "订阅退避重试成功: %s", groupID)
-		delete(retryGroups, groupID)
 	}
+	if len(retries) == 0 {
+		return schedule, nil
+	}
+	schedule.Nearest, schedule.Due = 0, schedule.Due[:0]
+	for _, groupID := range slices.Sorted(maps.Keys(schedule.NextByGroup)) {
+		epoch := schedule.NextByGroup[groupID]
+		if retry, exists := retries[groupID]; exists {
+			epoch = retry.epoch
+		}
+		if schedule.Nearest == 0 || epoch < schedule.Nearest {
+			schedule.Nearest = epoch
+		}
+		if epoch <= now {
+			schedule.Due = append(schedule.Due, groupID)
+		}
+	}
+	return schedule, nil
 }
 
 type systemTimer struct {
@@ -307,15 +282,8 @@ func stopTimer(timer Timer) {
 	}
 }
 
-// RunDue 顺序执行当前已经到期的订阅更新。
-func RunDue(ctx context.Context, options Options, now time.Time, logger *log.Logger) (Summary, error) {
-	if err := validateOptions(options); err != nil {
-		return Summary{}, err
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	schedule, err := catalog.Schedule(ctx, options.Root, now.Unix())
+func runDue(ctx context.Context, options Options, now time.Time, logger *log.Logger, retries map[string]subscriptionRetry) (Summary, error) {
+	schedule, err := subscriptionSchedule(ctx, options.Root, now.Unix(), retries)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -330,27 +298,21 @@ func RunDue(ctx context.Context, options Options, now time.Time, logger *log.Log
 		updated, updateErr := UpdateGroup(ctx, options, groupID, now, logger)
 		if updateErr != nil {
 			summary.Failed = append(summary.Failed, groupID)
-			summary.failureKinds = append(summary.failureKinds, classifyWorkerError(updateErr))
+			if retries != nil {
+				attempt := retries[groupID].attempt + 1
+				delay := workerRetryDelay(attempt, classifyWorkerError(updateErr))
+				retries[groupID] = subscriptionRetry{attempt: attempt, epoch: options.Now().Add(delay).Unix()}
+			}
 			if logger != nil {
 				logWorker(logger, "ERROR", "subscription.update", "failed", "订阅更新失败: %s: %v", groupID, updateErr)
 			}
 			continue
 		}
+		delete(retries, groupID)
 		summary.Updated = append(summary.Updated, groupID)
 		logWorker(logger, "INFO", "subscription.update", "success", "订阅更新完成: %s，节点 %d，运行时状态 %s", groupID, updated.NodeCount, updated.RuntimeSyncState)
 	}
 	return summary, nil
-}
-
-// UpdateGroup 执行单个订阅更新，并统一处理更新后的运行时状态。
-func (summary Summary) failureKind(runErr error) workerFailureKind {
-	if runErr != nil {
-		return classifyWorkerError(runErr)
-	}
-	if slices.Contains(summary.failureKinds, workerFailurePermanent) {
-		return workerFailurePermanent
-	}
-	return workerFailureTransient
 }
 
 func workerRetryDelay(attempt int, kind workerFailureKind) time.Duration {
@@ -419,6 +381,7 @@ func subscriptionErrorCause(value *subscription.Error) string {
 	return cause
 }
 
+// UpdateGroup 执行单个订阅更新，并统一处理更新后的运行时状态。
 func UpdateGroup(ctx context.Context, options Options, groupID string, now time.Time, logger *log.Logger) (subscription.Result, error) {
 	runtimeRunning := workerProcessRunning(options.SingBoxPath)
 	result, err := subscription.Update(ctx, subscription.UpdateOptions{
@@ -451,7 +414,9 @@ func UpdateGroup(ctx context.Context, options Options, groupID string, now time.
 // SyncEditedGroup 将已持久化的订阅编辑通过统一运行时流程应用到 sing-box。
 func SyncEditedGroup(ctx context.Context, options Options, groupID string, now time.Time, logger *log.Logger) (subscription.Result, error) {
 	result := subscription.Result{GroupID: groupID, Persisted: true}
-	metadata, err := catalog.LoadMetadata(ctx, filepath.Join(options.Root, groupID, "meta.json"), groupID)
+	localContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	metadata, err := catalog.LoadMetadata(localContext, filepath.Join(options.Root, groupID, "meta.json"), groupID)
 	if err != nil {
 		return result, persistedEffectFailure(result, err)
 	}
@@ -469,12 +434,15 @@ func SyncEditedGroup(ctx context.Context, options Options, groupID string, now t
 }
 
 func applyRuntimeSync(ctx context.Context, options Options, result subscription.Result, groupID string, logger *log.Logger, forceReload bool, now time.Time) (subscription.Result, error) {
-	runtimeState, runtimeAttempted, effectErr := applyUpdateEffects(ctx, options, result, groupID, logger, forceReload)
+	runtimeState, runtimeAttempted, effectErr := applyUpdateEffects(ctx, options, result, groupID, forceReload)
+	// 已提交的同步状态必须落盘，取消只阻止运行时操作。
+	localContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	result.RuntimeSyncState = runtimeState
 	result.RuntimeSynced = runtimeState == subscription.RuntimeSyncApplied
 	if effectErr != nil {
 		if runtimeAttempted {
-			if err := subscription.RecordRuntimeSyncFailure(ctx, options.Root, result.GroupID, effectErr, now); err != nil {
+			if err := subscription.RecordRuntimeSyncFailure(localContext, options.Root, result.GroupID, effectErr, now); err != nil {
 				effectErr = errors.Join(effectErr, err)
 			}
 			result.RuntimeSyncPending = true
@@ -484,7 +452,7 @@ func applyRuntimeSync(ctx context.Context, options Options, result subscription.
 			return result, runtimeSyncFailure(result, effectErr)
 		}
 		pending := result.RuntimeSyncPending || runtimeState != subscription.RuntimeSyncNotRunning
-		if err := subscription.RecordPersistedEffectFailure(ctx, options.Root, result.GroupID, pending, effectErr, now); err != nil {
+		if err := subscription.RecordPersistedEffectFailure(localContext, options.Root, result.GroupID, pending, effectErr, now); err != nil {
 			effectErr = errors.Join(effectErr, err)
 		}
 		result.RuntimeSyncPending = pending
@@ -494,12 +462,12 @@ func applyRuntimeSync(ctx context.Context, options Options, result subscription.
 		return result, persistedEffectFailure(result, effectErr)
 	}
 	if runtimeState == subscription.RuntimeSyncNotRunning {
-		if err := subscription.RecordRuntimeSyncNotRunning(ctx, options.Root, result.GroupID, now); err != nil {
+		if err := subscription.RecordRuntimeSyncNotRunning(localContext, options.Root, result.GroupID, now); err != nil {
 			return result, persistedEffectFailure(result, err)
 		}
 	}
 	if runtimeState == subscription.RuntimeSyncApplied {
-		if err := subscription.RecordRuntimeSyncSuccess(ctx, options.Root, result.GroupID, now); err != nil {
+		if err := subscription.RecordRuntimeSyncSuccess(localContext, options.Root, result.GroupID, now); err != nil {
 			result.RuntimeSyncPending = true
 			return result, persistedEffectFailure(result, err)
 		}
@@ -524,25 +492,22 @@ func nextUpdate(ctx context.Context, root string, now int64) (int64, error) {
 	return schedule.Nearest, nil
 }
 
-func applyUpdateEffects(ctx context.Context, options Options, result subscription.Result, groupID string, logger *log.Logger, forceReload bool) (string, bool, error) {
-	activated, err := activateGroupIfNeeded(ctx, options, groupID)
+func applyUpdateEffects(ctx context.Context, options Options, result subscription.Result, groupID string, forceReload bool) (string, bool, error) {
+	if options.SyncCatalog == nil {
+		return currentRuntimeSyncState(options), false, errors.New("未配置 Catalog 同步回调")
+	}
+	state, attempted, err := options.SyncCatalog(ctx, groupID, forceReload || result.StructureChanged)
 	if err != nil {
-		return currentRuntimeSyncState(options), false, err
-	}
-	if err := fallbackMissingNode(ctx, options, groupID, logger); err != nil {
-		return currentRuntimeSyncState(options), false, err
-	}
-	if !workerProcessRunning(options.SingBoxPath) {
-		return subscription.RuntimeSyncNotRunning, false, nil
-	}
-	reloaded := forceReload || result.StructureChanged || activated
-	if reloaded {
-		if options.ReloadService == nil {
-			return subscription.RuntimeSyncFailed, true, errors.New("未配置服务 reload 回调")
-		}
-		if err := options.ReloadService(ctx); err != nil {
+		if attempted {
 			return subscription.RuntimeSyncFailed, true, err
 		}
+		return currentRuntimeSyncState(options), attempted, err
+	}
+	if state == subscription.RuntimeSyncNotRunning {
+		return state, attempted, nil
+	}
+	if state != subscription.RuntimeSyncApplied {
+		return currentRuntimeSyncState(options), attempted, fmt.Errorf("Catalog 同步返回无效状态: %s", state)
 	}
 	if err := workerVerifyRuntime(ctx, options, groupID); err != nil {
 		return subscription.RuntimeSyncFailed, true, err
@@ -648,78 +613,6 @@ func runtimeProviderMatches(outbounds []serviceapi.GroupItem, runtimeTag string,
 		}
 	}
 	return true
-}
-
-func activateGroupIfNeeded(ctx context.Context, options Options, groupID string) (bool, error) {
-	module, err := workerLoadModule(options.ModuleConf)
-	if err != nil {
-		return false, err
-	}
-	active := module.ActiveGroupID
-	if active != "" {
-		hasNodes, hasErr := workerGroupHasNodes(ctx, options.Root, active)
-		if hasErr != nil {
-			return false, hasErr
-		}
-		if hasNodes {
-			return false, nil
-		}
-	}
-	hasNodes, err := workerGroupHasNodes(ctx, options.Root, groupID)
-	if err != nil || !hasNodes {
-		return false, err
-	}
-	if err := workerUpdateModule(ctx, options.ModuleConf, map[string]string{
-		"ACTIVE_GROUP_ID":   moduleconfig.Quote(groupID),
-		"SELECTOR_MODE":     "urltest",
-		"SELECTED_NODE_REF": moduleconfig.Quote(""),
-	}); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func fallbackMissingNode(ctx context.Context, options Options, groupID string, logger *log.Logger) error {
-	module, err := workerLoadModule(options.ModuleConf)
-	if err != nil || module.SelectorMode != "manual" {
-		return err
-	}
-	selected := module.SelectedNodeRef
-	if selected == "" {
-		return err
-	}
-	selectedGroup, selectedTag, found := strings.Cut(selected, "/")
-	if !found || selectedGroup != groupID || selectedTag == "" {
-		return nil
-	}
-	present, err := workerGroupContainsTag(ctx, options.Root, groupID, selectedTag)
-	if err != nil || present {
-		return err
-	}
-	if err := workerUpdateModule(ctx, options.ModuleConf, map[string]string{
-		"SELECTOR_MODE":     "urltest",
-		"SELECTED_NODE_REF": moduleconfig.Quote(""),
-	}); err != nil {
-		return err
-	}
-	runtimeTag, err := catalog.RuntimeTag(ctx, options.Root, groupID)
-	if err != nil {
-		return err
-	}
-	if logger != nil {
-		logWorker(logger, "WARN", "node.selection", "fallback", "手动节点已从 Provider 移除，回退到 Auto/%s", runtimeTag)
-	}
-	if !isProcessRunning(options.SingBoxPath) {
-		return nil
-	}
-	client, err := serviceapi.New(options.ServiceAddress, options.ServiceSecret)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	requestContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return client.Select(requestContext, "Proxy", "Auto/"+runtimeTag)
 }
 
 func validateOptions(options Options) error {

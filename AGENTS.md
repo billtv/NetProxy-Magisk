@@ -25,7 +25,9 @@
 - 机器接口固定使用 `schema=1` JSON。stdout 只能包含结果 JSON，日志与诊断写 stderr；字段、错误码或状态语义变化必须同步检查 Shell、Go、Android、WebUI 和测试。
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
 - Catalog 是持久节点事实源：每组使用 `data/catalog/<group-id>/meta.json` 与 `provider.json`。`staging/` 只存事务临时文件，不得作为持久状态读取。
-- `ACTIVE_GROUP_ID` 保存分组 ID；`SELECTOR_MODE` 只允许 `urltest` 或 `manual`；`SELECTED_NODE_REF` 只在手动模式保存 `<group-id>/<tag>`。
+- 节点选择只持久化 `ACTIVE_GROUP_ID` 与 `SELECTED_NODE_TAG`：空 tag 使用同组 Auto，非空 tag 手动选择。模式、节点引用和运行时标签由这两项派生，不读取旧选择字段或增加迁移逻辑。
+- 用户选节点按生命周期锁、配置文件锁串行保存和应用；启动与重载只同步已保存选择，不再次调用用户保存入口。选择器 API 仅对临时通信或服务错误在总时限内重试，遵循请求取消；最终失败返回 `node.runtime_sync_failed` 并保留已保存选择，不重载兜底；Catalog 结构变化显式重载。
+- 本地节点变更与删除订阅先等待生命周期锁、恢复未完成配置事务，再提交 Catalog；提交后即使取消也要有界完成本地选择整理，Worker 同步必须在取锁前建立独立收尾上下文，并在锁内读取最新选择。订阅同步状态落盘同样有界且不受请求取消影响，运行时操作仍使用原请求上下文。提交后的本地或运行时失败分别返回 `node.persisted_effect_failed` / `node.runtime_sync_failed` 或对应的 `subscription.*`，并携带 `persisted=true`。Worker 通过 `SyncCatalog` 回调复用同一流程；pending 重试必须重新应用已保存选择，不能只验证 Provider 后清除 pending。
 - Provider 的运行时显示标签来自分组名称；名称冲突时才附加分组 ID。用户界面不得直接显示 UUID 代替可读名称。
 - 自动选择必须落到 `Auto/<group>`，Provider/selector 的默认值绝不能静默回退到 `direct`。
 - eBPF 与 TUN 都是 sing-box 的入站实现，不是独立代理核心。服务、模式和节点切换文案继续使用“服务”或“sing-box”，不要泛化为“eBPF 服务”或“TUN 服务”。
@@ -78,6 +80,7 @@ src/module/service.sh
 - `cmd/netproxyctl/default.pgo` 只使用真实 Android 上的只读工作负载生成；正式构建保持 `-pgo=auto`，更新 profile 前必须确认不含订阅、节点或设备数据，并对比非 PGO 产物。
 - Provider 修改必须保持完整校验、稳定 tag、`0600` 权限和原子替换。错误必须返回结构化 diagnostics，不允许空输出加成功退出码。
 - Catalog 与配置回滚使用同目录临时文件替换目标，全部恢复成功并记录恢复完成后才删除备份；恢复失败不得清理 journal，否则再次中断可能丢失已恢复的数据。
+- Catalog 事务完成后的清理是可重试收尾，不改变已提交或已恢复的结果；必须先删除全部备份再删除完成标记。仍有备份但 journal 缺失时不得猜测事务结果或丢弃备份。
 - 配置应用按「生命周期锁 → 固定顺序的配置文件锁」执行。内部选择同步显式复用已持有的配置写入器，不能重复获取文件锁；所有配置写入共享同一路径锁，分应用增删必须在锁内读取最新名单。
 - Catalog 等待锁使用调用方 context，分组锁先于根锁。锁文件不保存业务或 owner 状态，互斥由操作系统文件锁保证。
 - sing-box 静态事实源只有 `config/singbox/config.json`。分区编辑由 Go 在配置事务锁内替换指定顶层字段，保留其他字段和数组顺序；客户端使用读取时的 `revision`，同分区冲突返回 `config.conflict`。不能在 Android 中把整份旧快照合并写回。
@@ -262,13 +265,13 @@ data/catalog/
 
 ```ini
 ACTIVE_GROUP_ID="default"
-SELECTOR_MODE=urltest
-SELECTED_NODE_REF=""
+SELECTED_NODE_TAG=""
 ```
 
-- 自动模式下 `SELECTED_NODE_REF` 必须为空，实际选中节点由 Service API 报告。
-- 手动模式保存 `<group-id>/<tag>`，不保存文件路径。
+- `SELECTED_NODE_TAG` 为空使用同组 Auto，实际选中节点由 Service API 报告，不写回手动选择。
+- 手动模式仅保存当前分组节点的 tag，不重复保存分组 ID 或文件路径。
 - 手动节点在 Provider 更新后消失时回退该组 Auto。
+- 公开命令仍使用 `node use auto [group]` 或 `node use <group-id>/<tag>`；JSON 的 `selector_mode` 与 `selected_node_ref` 是派生结果，不是另一个持久事实源。订阅更新在配置文件锁内读取最新选择后计算变更，不能覆盖并发用户选择。
 - 出站模式使用主配置与内核生成的原生列表；客户端翻译已知模式的显示文案，自定义名称原样显示。模式切换保存默认值，当前 Wi-Fi 绕过策略仍可使实际模式为 `Direct`。
 
 ## 订阅事务
@@ -289,7 +292,11 @@ SELECTED_NODE_REF=""
 
 下载、转换和校验阶段可以取消，原子提交阶段不可取消。任何失败都保留上一版有效 Provider 和当前选择。核心 ready 时可按设置经本地代理下载；核心停止或代理下载失败时，`auto` 策略允许直连重试。
 
+HTTP 验证器只跟随已接受的 Provider 更新：失败保留原 ETag/Last-Modified，成功 200 替换或清空，304 只更新实际返回的值。跨域后的整个重定向链不得重新携带初始敏感 Header，HTTPS 降级与超过跳数限制均拒绝，不触发直连重试。
+
 Worker 根据各订阅的 `next_update_at` 调度，不依赖 sing-box 和 `crond`；同时通过 netlink 监听 Android 路由、地址和接口变化，再读取 Wi-Fi 与实际出口状态进行策略评估，不得改回文件或定时轮询。运行时进度放在 `/dev/netproxy/subscriptions/`，完成后不作为长期 UI 状态显示。
+
+失败退避按分组独立计算，正常调度和重试取最早截止时间；每轮读取最新启用状态，关闭自动更新或删除分组后丢弃重试。退避仅保存在 Worker 内存，配置唤醒重新计算调度但不提前重试失败分组。
 
 订阅响应头的解析要点：`Subscription-Userinfo` 提供流量与到期，空值（如 `expire=`）表示不适用而非畸形；`Profile-Title` 可能带 `base64:` 前缀或 RFC 2047 编码；`Content-Disposition` 的 `filename` 可能是 RFC 5987 形式，也可能直接携带原始 UTF-8 字节。
 

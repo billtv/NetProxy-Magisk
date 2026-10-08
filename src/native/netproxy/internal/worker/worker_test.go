@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/subscription"
@@ -27,6 +28,96 @@ type manualClock struct {
 	now    time.Time
 	timers []*manualTimer
 	delays []time.Duration
+}
+
+func TestRetryScheduleDropsDisabledDeletedAndLocalGroups(t *testing.T) {
+	for _, change := range []string{"disable", "delete", "local"} {
+		t.Run(change, func(t *testing.T) {
+			now := time.Now()
+			root, _ := prepareWorkerFixture(t, "https://fixture.invalid", now)
+			retries := map[string]subscriptionRetry{"fixture": {attempt: 1, epoch: now.Unix()}}
+			path := filepath.Join(root, "fixture", "meta.json")
+			if change == "delete" {
+				if err := catalog.DeleteGroup(t.Context(), root, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				metadata, err := catalog.LoadMetadata(t.Context(), path, "fixture")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if change == "disable" {
+					metadata.AutoUpdate = false
+				} else {
+					metadata.Type = "local"
+				}
+				if err := catalog.SaveMetadataAtomic(t.Context(), path, metadata); err != nil {
+					t.Fatal(err)
+				}
+			}
+			schedule, err := subscriptionSchedule(t.Context(), root, now.Unix(), retries)
+			if err != nil || len(retries) != 0 || len(schedule.Due) != 0 || schedule.Nearest != 0 {
+				t.Fatalf("不再启用的订阅仍有重试: schedule=%+v retries=%+v err=%v", schedule, retries, err)
+			}
+		})
+	}
+}
+
+func TestRetryScheduleDoesNotBypassBackoff(t *testing.T) {
+	now := time.Now()
+	root, _ := prepareWorkerFixture(t, "https://fixture.invalid", now)
+	deadline := now.Add(15 * time.Minute).Unix()
+	retries := map[string]subscriptionRetry{"fixture": {attempt: 1, epoch: deadline}}
+	for range 3 {
+		schedule, err := subscriptionSchedule(t.Context(), root, now.Unix(), retries)
+		if err != nil || len(schedule.Due) != 0 || schedule.Nearest != deadline || retries["fixture"].attempt != 1 {
+			t.Fatalf("重新计算调度提前重试或重置退避: %+v %v", schedule, err)
+		}
+	}
+}
+
+func TestSyncEditedGroupCancellationReconcilesPersistedState(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(fmt.Sprint(running), func(t *testing.T) {
+			now := time.Now()
+			root, moduleConf := prepareWorkerFixture(t, "https://fixture.invalid", now)
+			path := filepath.Join(root, "fixture", "meta.json")
+			metadata, err := catalog.LoadMetadata(t.Context(), path, "fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata.Name, metadata.NodeCount, metadata.RuntimeSyncState = "Renamed", 3, subscription.RuntimeSyncApplied
+			if err := catalog.SaveMetadataAtomic(t.Context(), path, metadata); err != nil {
+				t.Fatal(err)
+			}
+			options := newTestOptions(root)
+			options.ModuleConf = moduleConf
+			installRuntimeHooks(t, nil, running, nil)
+			options.SyncCatalog = func(ctx context.Context, _ string, changed bool) (string, bool, error) {
+				if !changed {
+					t.Error("名称变化未要求更新运行时结构")
+				}
+				if running {
+					return subscription.RuntimeSyncFailed, true, ctx.Err()
+				}
+				return subscription.RuntimeSyncNotRunning, false, nil
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			result, syncErr := SyncEditedGroup(ctx, options, "fixture", now, nil)
+			after, err := catalog.LoadMetadata(t.Context(), path, "fixture")
+			if err != nil || !result.Persisted || result.NodeCount != 3 {
+				t.Fatalf("取消后丢失持久化结果: %+v %v", result, err)
+			}
+			if running {
+				if syncErr == nil || !after.RuntimeSyncPending || after.RuntimeSyncState != subscription.RuntimeSyncFailed || after.LastError == "" {
+					t.Fatalf("取消后未保留同步失败: %+v %v", after, syncErr)
+				}
+			} else if syncErr != nil || after.RuntimeSyncState != subscription.RuntimeSyncNotRunning {
+				t.Fatalf("停止状态未整理: %+v %v", after, syncErr)
+			}
+		})
+	}
 }
 
 type manualTimer struct {
@@ -118,7 +209,7 @@ func prepareWorkerFixture(t *testing.T, serverURL string, now time.Time) (string
 		t.Fatal(err)
 	}
 	moduleConf := filepath.Join(root, "module.conf")
-	content := "ACTIVE_GROUP_ID=\"default\"\nSELECTOR_MODE=urltest\n"
+	content := "ACTIVE_GROUP_ID=\"default\"\n"
 	if err := os.WriteFile(moduleConf, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +257,22 @@ func installRuntimeHooks(t *testing.T, options *Options, running bool, reload fu
 	originalRunning, originalVerify := workerProcessRunning, workerVerifyRuntime
 	workerProcessRunning = func(string) bool { return running }
 	workerVerifyRuntime = func(context.Context, Options, string) error { return nil }
-	if options != nil && reload != nil {
-		options.ReloadService = func(ctx context.Context) error {
-			return reload(ctx, *options)
+	if options != nil {
+		syncCatalog := options.SyncCatalog
+		options.SyncCatalog = func(ctx context.Context, groupID string, structureChanged bool) (string, bool, error) {
+			before, err := moduleconfig.LoadModule(options.ModuleConf)
+			if err != nil {
+				return currentRuntimeSyncState(*options), false, err
+			}
+			state, attempted, err := syncCatalog(ctx, groupID, structureChanged)
+			if err != nil || !running {
+				return state, attempted, err
+			}
+			after, err := moduleconfig.LoadModule(options.ModuleConf)
+			if err == nil && reload != nil && (structureChanged || before.ActiveGroupID != after.ActiveGroupID) {
+				err = reload(ctx, *options)
+			}
+			return subscription.RuntimeSyncApplied, true, err
 		}
 	}
 	t.Cleanup(func() {
@@ -177,21 +281,11 @@ func installRuntimeHooks(t *testing.T, options *Options, running bool, reload fu
 	})
 }
 
-func installPersistenceHooks(t *testing.T, updateModule func(string, map[string]string) error, groupHasNodes func(context.Context, string, string) (bool, error)) {
+func installPersistenceHooks(t *testing.T, options *Options, cause error) {
 	t.Helper()
-	originalUpdateModule, originalGroupHasNodes := workerUpdateModule, workerGroupHasNodes
-	if updateModule != nil {
-		workerUpdateModule = func(_ context.Context, path string, updates map[string]string) error {
-			return updateModule(path, updates)
-		}
+	options.SyncCatalog = func(context.Context, string, bool) (string, bool, error) {
+		return currentRuntimeSyncState(*options), false, cause
 	}
-	if groupHasNodes != nil {
-		workerGroupHasNodes = groupHasNodes
-	}
-	t.Cleanup(func() {
-		workerUpdateModule = originalUpdateModule
-		workerGroupHasNodes = originalGroupHasNodes
-	})
 }
 
 func historyContains(entries []jsontext.Value, code string) bool {
@@ -311,9 +405,7 @@ func TestUpdateGroupWhenServiceStoppedReturnsModuleConfigEffectError(t *testing.
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
 	installRuntimeHooks(t, &options, false, func(context.Context, Options) error { return nil })
-	installPersistenceHooks(t, func(string, map[string]string) error {
-		return errors.New("module.conf write failed")
-	}, nil)
+	installPersistenceHooks(t, &options, errors.New("module.conf write failed"))
 
 	result, err := UpdateGroup(context.Background(), options, "fixture", now, nil)
 	if err == nil {
@@ -344,9 +436,7 @@ func TestUpdateGroupWhenServiceStoppedReturnsCatalogReadError(t *testing.T) {
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
 	installRuntimeHooks(t, &options, false, func(context.Context, Options) error { return nil })
-	installPersistenceHooks(t, nil, func(context.Context, string, string) (bool, error) {
-		return false, errors.New("Catalog read failed")
-	})
+	installPersistenceHooks(t, &options, errors.New("Catalog read failed"))
 
 	result, err := UpdateGroup(context.Background(), options, "fixture", now, nil)
 	if err == nil {
@@ -377,9 +467,7 @@ func TestUpdateGroupWhenServiceStoppedEffectFailureStoresMetadata(t *testing.T) 
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
 	installRuntimeHooks(t, &options, false, func(context.Context, Options) error { return nil })
-	installPersistenceHooks(t, func(string, map[string]string) error {
-		return errors.New("module.conf write failed")
-	}, nil)
+	installPersistenceHooks(t, &options, errors.New("module.conf write failed"))
 
 	result, err := UpdateGroup(context.Background(), options, "fixture", now, nil)
 	if err == nil {
@@ -420,9 +508,7 @@ func TestUpdateGroupWhenServiceStoppedReturnsCatalogReadErrorWithMetadata(t *tes
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
 	installRuntimeHooks(t, &options, false, func(context.Context, Options) error { return nil })
-	installPersistenceHooks(t, nil, func(context.Context, string, string) (bool, error) {
-		return false, errors.New("Catalog read failed")
-	})
+	installPersistenceHooks(t, &options, errors.New("Catalog read failed"))
 
 	result, err := UpdateGroup(context.Background(), options, "fixture", now, nil)
 	if err == nil {
@@ -462,7 +548,7 @@ func TestUpdateGroupWhenServiceRunningUsesProviderWatch(t *testing.T) {
 	options := newTestOptions(root)
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
-	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=fixture\nSELECTOR_MODE=urltest\n"), 0o600); err != nil {
+	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(root, "fixture", "provider.json"), []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}`+"\n"), 0o600); err != nil {
@@ -497,7 +583,7 @@ func TestUpdateGroupProviderWatchFailureDoesNotReload(t *testing.T) {
 	options := newTestOptions(root)
 	options.ModuleConf = moduleConf
 	options.SingBoxPath = filepath.Join(root, "sing-box")
-	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=fixture\nSELECTOR_MODE=urltest\n"), 0o600); err != nil {
+	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(root, "fixture", "provider.json"), []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}`+"\n"), 0o600); err != nil {
@@ -610,6 +696,48 @@ func TestUpdateGroupRuntimeSyncFailureReturnsStructuredErrorAndKeepsProvider(t *
 	}
 	if runtime.NodeCount != 1 {
 		t.Fatalf("重启准备阶段节点数异常: %+v", runtime)
+	}
+}
+
+func TestUpdateGroupCancellationAfterCommitRecordsFailure(t *testing.T) {
+	for _, runtimeAttempted := range []bool{false, true} {
+		t.Run(fmt.Sprint(runtimeAttempted), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"outbounds":[{"type":"socks","tag":"NEW","server":"127.0.0.1","server_port":1080}]}`))
+			}))
+			defer server.Close()
+			now := time.Unix(1_700_425_000, 0)
+			root, moduleConf := prepareWorkerFixture(t, server.URL, now)
+			options := newTestOptions(root)
+			options.ModuleConf = moduleConf
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			options.SyncCatalog = func(ctx context.Context, _ string, _ bool) (string, bool, error) {
+				cancel()
+				return subscription.RuntimeSyncFailed, runtimeAttempted, ctx.Err()
+			}
+			result, err := UpdateGroup(ctx, options, "fixture", now, nil)
+			wantCode, wantMessage := "subscription.persisted_effect_failed", subscription.PersistedEffectFailureMessage
+			if runtimeAttempted {
+				wantCode, wantMessage = "subscription.runtime_sync_failed", subscription.RuntimeSyncFailureMessage
+			}
+			var syncErr *subscription.Error
+			if !result.Persisted || result.RuntimeSynced || !errors.As(err, &syncErr) || syncErr.Code != wantCode {
+				t.Fatalf("取消后丢失已提交状态或错误分类: %+v %v", result, err)
+			}
+			metadata, err := catalog.PrivateMetadata(t.Context(), root, "fixture")
+			if err != nil || metadata.RuntimeSyncPending != runtimeAttempted || !strings.Contains(metadata.LastError, wantMessage) || metadata.LastSuccessAt != now.UTC().Format(time.RFC3339) {
+				t.Fatalf("取消后未落盘失败状态或覆盖了下载成功时间: %+v %v", metadata, err)
+			}
+			history, err := subscription.LoadHistory(filepath.Join(root, "fixture", "history.jsonl"))
+			if err != nil || !historyContains(history, wantCode) {
+				t.Fatalf("取消后未落盘失败历史: %v %v", history, err)
+			}
+			document, err := provider.Load(t.Context(), filepath.Join(root, "fixture", "provider.json"))
+			if err != nil || len(document.Outbounds) != 1 || document.Outbounds[0].Tag != "NEW" {
+				t.Fatalf("取消后丢失已提交 Provider: %+v %v", document, err)
+			}
+		})
 	}
 }
 
@@ -1063,7 +1191,7 @@ func TestRunDueContinuesAfterOneSubscriptionFails(t *testing.T) {
 
 	root := t.TempDir()
 	moduleConf := filepath.Join(root, "module.conf")
-	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=\"good\"\nSELECTOR_MODE=urltest\n"), 0o600); err != nil {
+	if err := os.WriteFile(moduleConf, []byte("ACTIVE_GROUP_ID=\"good\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, item := range []struct {
@@ -1094,7 +1222,7 @@ func TestRunDueContinuesAfterOneSubscriptionFails(t *testing.T) {
 	options := newTestOptions(root)
 	options.ModuleConf = moduleConf
 	options.Now = func() time.Time { return now }
-	summary, err := RunDue(context.Background(), options, now, log.New(io.Discard, "", 0))
+	summary, err := runDue(context.Background(), options, now, log.New(io.Discard, "", 0), nil)
 	if err != nil {
 		t.Fatalf("批量更新不应因单项失败而中断: %v", err)
 	}
@@ -1291,5 +1419,90 @@ func TestWorkerStartRequiresPIDState(t *testing.T) {
 	err := waitForWorkerPID(ctx, filepath.Join(t.TempDir(), "worker.pid"), os.Getpid(), 20*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "PID") {
 		t.Fatalf("missing PID state was not reported: %v", err)
+	}
+}
+
+func TestWorkerBackoffDoesNotDelayHealthySubscription(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("invalid subscription")) }))
+	defer server.Close()
+	clock := newManualClock(time.Unix(1700000000, 0))
+	root, moduleConf := prepareWorkerFixture(t, server.URL, clock.Now())
+	group := filepath.Join(root, "healthy")
+	if err := os.MkdirAll(group, 0700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := catalog.NewMetadata("healthy", "Healthy", "subscription", server.URL, clock.Now())
+	metadata.AutoUpdate, metadata.UpdateInterval, metadata.UpdateViaProxy = true, 900, "never"
+	metadata.NextUpdateEpoch = clock.Now().Unix() + 60
+	metadata.NextUpdateAt = catalog.FormatEpochUTC(metadata.NextUpdateEpoch)
+	if err := catalog.SaveMetadataAtomic(t.Context(), filepath.Join(group, "meta.json"), metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.WriteAtomic(filepath.Join(group, "provider.json"), []byte(`{"outbounds":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := newTestOptions(root)
+	options.ModuleConf, options.Now, options.NewTimer = moduleConf, clock.Now, clock.NewTimer
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, options, nil, log.New(io.Discard, "", 0)) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for len(clock.Delays()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	delays := clock.Delays()
+	if len(delays) == 0 {
+		t.Fatal("no timer")
+	}
+	t.Logf("healthy due in 1m; worker sleep=%v", delays[0])
+	if delays[0] > time.Minute {
+		t.Fatal("failed subscription delayed an unrelated healthy subscription")
+	}
+}
+
+func TestWorkerRetryStopsWhenAutoUpdateDisabled(t *testing.T) {
+	requests := make(chan struct{}, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		_, _ = w.Write([]byte("invalid subscription"))
+	}))
+	defer server.Close()
+	clock := newManualClock(time.Unix(1700000000, 0))
+	root, moduleConf := prepareWorkerFixture(t, server.URL, clock.Now())
+	options := newTestOptions(root)
+	options.ModuleConf, options.Now, options.NewTimer = moduleConf, clock.Now, clock.NewTimer
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, options, nil, log.New(io.Discard, "", 0)) }()
+	waitRequest(t, requests)
+	waitTimerDelay(t, clock, 15*time.Minute, 0)
+	path := filepath.Join(root, "fixture", "meta.json")
+	metadata, err := catalog.LoadMetadata(t.Context(), path, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.AutoUpdate = false
+	if err := catalog.SaveMetadataAtomic(t.Context(), path, metadata); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(15 * time.Minute)
+	select {
+	case <-requests:
+		cancel()
+		<-done
+		t.Fatal("关闭自动更新后仍发起退避重试请求")
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("关闭最后一个自动订阅后 Worker 未完成调度")
 	}
 }
