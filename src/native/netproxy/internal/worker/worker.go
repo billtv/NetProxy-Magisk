@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
@@ -63,7 +64,7 @@ type Options struct {
 	ProgressDir    string
 	PIDFile        string
 	LogFile        string
-	ModuleConf     string
+	ModuleConfig   string
 	SingBoxPath    string
 	ServiceAddress string
 	ServiceSecret  string
@@ -149,17 +150,13 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 		}()
 	}
 
-	networkWatchEnabled := options.NetworkWatchEnabled && options.NetworkEvaluate != nil
+	networkWatchEnabled := false
 	var networkDone chan struct{}
-	if networkWatchEnabled {
-		networkDone = make(chan struct{})
-		go func() {
-			defer close(networkDone)
-			runNetworkWatcher(background, options, logger)
-		}()
-		logWorker(logger, "INFO", "network.watch", "started", "Android 网络事件监听已启动")
-	}
+	var cancelNetwork context.CancelFunc
 	defer func() {
+		if cancelNetwork != nil {
+			cancelNetwork()
+		}
 		cancelBackground()
 		if telemetryDone != nil {
 			<-telemetryDone
@@ -173,6 +170,30 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 	consecutiveFailures := 0
 	retries := make(map[string]subscriptionRetry)
 	for {
+		watch := options.NetworkWatchEnabled && options.NetworkEvaluate != nil
+		if watch && options.ModuleConfig != "" {
+			module, err := moduleconfig.LoadModule(options.ModuleConfig)
+			if err != nil {
+				return err
+			}
+			watch = module.WiFi.Enabled
+		}
+		if networkWatchEnabled != watch {
+			if cancelNetwork != nil {
+				cancelNetwork()
+				<-networkDone
+				networkDone = nil
+				cancelNetwork = nil
+			}
+			if watch {
+				networkContext, cancel := context.WithCancel(background)
+				cancelNetwork = cancel
+				networkDone = make(chan struct{})
+				done := networkDone
+				go func() { defer cancel(); defer close(done); runNetworkWatcher(networkContext, options, logger) }()
+			}
+			networkWatchEnabled = watch
+		}
 		now := options.Now()
 		_, err := runDue(ctx, options, now, logger, retries)
 		var nearest int64
@@ -616,7 +637,7 @@ func runtimeProviderMatches(outbounds []serviceapi.GroupItem, runtimeTag string,
 }
 
 func validateOptions(options Options) error {
-	for name, value := range map[string]string{"Catalog 根目录": options.Root, "PID 文件": options.PIDFile, "模块配置": options.ModuleConf} {
+	for name, value := range map[string]string{"Catalog 根目录": options.Root, "PID 文件": options.PIDFile, "模块配置": options.ModuleConfig} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s不能为空", name)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,76 @@ type BuildResult struct {
 	Runtime         Runtime
 	MissingPackages []PackageRef
 	Backend         string
+}
+
+// WithDNSBypass 只覆盖运行时副本，不修改用户保存的入站偏好。
+func (c Config) WithDNSBypass(bypass bool) (Config, error) {
+	if !bypass {
+		return c, nil
+	}
+	var err error
+	if c.Backend == "ebpf" {
+		native, nativeErr := c.EBPFOptions()
+		if nativeErr != nil {
+			return c, nativeErr
+		}
+		local, shared := native.EffectiveEnablement()
+		if local {
+			native.Local.DNSMode = "off"
+		}
+		if shared {
+			native.Shared.DNSMode = "off"
+		}
+		c.EBPF, err = marshalNative(ebpfInbound{Type: "ebpf", Tag: Tag, EBPFInboundOptions: native})
+	} else {
+		native, nativeErr := c.TUNOptions()
+		if nativeErr != nil {
+			return c, nativeErr
+		}
+		native.DNSMode = "disabled"
+		c.TUN, err = marshalNative(tunInbound{Type: "tun", Tag: Tag, TunInboundOptions: native})
+	}
+	return c, err
+}
+
+func (c Config) DNSState() (string, error) {
+	if c.Backend == "ebpf" {
+		native, err := c.EBPFOptions()
+		if err != nil {
+			return "", err
+		}
+		local, shared := native.EffectiveEnablement()
+		if !local {
+			native.Local.DNSMode = ""
+		}
+		if !shared {
+			native.Shared.DNSMode = ""
+		}
+		return fmt.Sprintf("ebpf:%t:%s:%t:%s", local, native.Local.DNSMode, shared, native.Shared.DNSMode), nil
+	}
+	native, err := c.TUNOptions()
+	if err != nil {
+		return "", err
+	}
+	return "tun:" + native.DNSMode, nil
+}
+
+func RuntimeDNSState(content []byte) (string, error) {
+	var runtime Runtime
+	if err := json.Unmarshal(content, &runtime); err != nil {
+		return "", err
+	}
+	if len(runtime.Inbounds) != 1 {
+		return "", fmt.Errorf("受管运行时必须只有一个入站")
+	}
+	var identity struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(runtime.Inbounds[0], &identity); err != nil {
+		return "", err
+	}
+	c := Config{Backend: identity.Type, EBPF: runtime.Inbounds[0], TUN: runtime.Inbounds[0]}
+	return c.DNSState()
 }
 
 func (c Config) Build(ctx context.Context) (BuildResult, error) {
@@ -69,6 +140,12 @@ func (c Config) BuildWithResolver(resolve PackageUIDResolver) (BuildResult, erro
 				native.Local.ExcludeUID = append(native.Local.ExcludeUID, resolution.UIDs...)
 			}
 		}
+		if local {
+			if err := c.applyRootPolicy(&native.Local.IncludeUID, native.Local.IncludeUIDRange, &native.Local.ExcludeUID, &native.Local.ExcludeUIDRange,
+				len(native.Local.IncludePackage) > 0); err != nil {
+				return BuildResult{}, err
+			}
+		}
 		native, err = normalizeEBPF(native)
 		if err == nil {
 			content, err = marshalNative(ebpfInbound{Type: "ebpf", Tag: Tag, EBPFInboundOptions: native})
@@ -91,6 +168,10 @@ func (c Config) BuildWithResolver(resolve PackageUIDResolver) (BuildResult, erro
 			} else {
 				native.ExcludeUID = append(native.ExcludeUID, resolution.UIDs...)
 			}
+		}
+		if err := c.applyRootPolicy(&native.IncludeUID, native.IncludeUIDRange, &native.ExcludeUID, &native.ExcludeUIDRange,
+			len(native.IncludePackage) > 0); err != nil {
+			return BuildResult{}, err
 		}
 		native, err = normalizeTUN(native)
 		if err == nil {
@@ -146,6 +227,9 @@ func (c Config) EffectiveContent() ([]byte, error) {
 		local, _ := native.EffectiveEnablement()
 		if !local {
 			app.Enabled = false
+		} else if err := c.applyRootPolicy(&native.Local.IncludeUID, native.Local.IncludeUIDRange, &native.Local.ExcludeUID, &native.Local.ExcludeUIDRange,
+			len(native.Local.IncludePackage) > 0); err != nil {
+			return nil, err
 		}
 		native, err = normalizeEBPF(native)
 		if err == nil {
@@ -155,6 +239,10 @@ func (c Config) EffectiveContent() ([]byte, error) {
 		var native option.TunInboundOptions
 		native, err = c.TUNOptions()
 		if err != nil {
+			return nil, err
+		}
+		if err := c.applyRootPolicy(&native.IncludeUID, native.IncludeUIDRange, &native.ExcludeUID, &native.ExcludeUIDRange,
+			len(native.IncludePackage) > 0); err != nil {
 			return nil, err
 		}
 		native, err = normalizeTUN(native)

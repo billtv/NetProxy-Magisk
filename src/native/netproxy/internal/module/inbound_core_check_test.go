@@ -171,7 +171,7 @@ func targetCoreFixture(t *testing.T, core string, content []byte) (Options, map[
 	options.WiFiStateFile = filepath.Join(root, "state", "wifi_state")
 	options.Telemetry = nil
 	files := map[string][]byte{
-		options.ModuleConfig:                    []byte("ACTIVE_GROUP_ID=default\nSELECTED_NODE_TAG=\n"),
+		options.ModuleConfig:                    []byte("{\"selection\":{\"group_id\":\"default\",\"node_tag\":\"\"}}"),
 		options.InboundConfig:                   content,
 		paths.SingBoxConfig(options.SingBoxDir): []byte(targetCoreStaticConfig),
 	}
@@ -480,6 +480,37 @@ func TestInboundTargetCoreCheck(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRootPolicyTargetCoreCheck(t *testing.T) {
+	core := targetCoreBinary(t)
+	for _, backend := range []string{"ebpf", "tun"} {
+		for _, policy := range []string{"default", "include", "exclude"} {
+			t.Run(backend+"/"+policy, func(t *testing.T) {
+				config, err := inbound.Parse([]byte(testInboundConfig))
+				if err != nil {
+					t.Fatal(err)
+				}
+				config.Backend, config.RootPolicy = backend, policy
+				config.App = inbound.AppPolicy{Enabled: true, Mode: "whitelist", ProxyApps: []string{}, BypassApps: []string{}}
+				content, err := json.Marshal(config, json.Deterministic(true))
+				if err != nil {
+					t.Fatal(err)
+				}
+				options, originals := targetCoreFixture(t, core, content)
+				prepared, err := Check(t.Context(), options, false)
+				if err != nil {
+					t.Fatalf("Root 策略真实核心 check 失败: %v", err)
+				}
+				assertTargetCoreRuntime(t, options, prepared, backend)
+				for path, original := range originals {
+					if !bytes.Equal(original, targetCoreRead(t, path)) {
+						t.Fatal("check 修改持久文件", path)
+					}
+				}
+			})
+		}
 	}
 }
 

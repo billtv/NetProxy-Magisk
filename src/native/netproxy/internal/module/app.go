@@ -48,6 +48,7 @@ type Options struct {
 	NetworkStateReader worker.NetworkStateReader
 	Telemetry          *telemetry.Reporter
 	configEditors      map[string]*moduleconfig.Editor
+	networkEvaluation  *NetworkEvaluation
 }
 
 // NewOptions 根据模块根目录返回完整的默认路径。
@@ -77,10 +78,11 @@ func NewOptions(moduleDir string) Options {
 // PrepareResult 描述一次运行时准备结果。
 type PrepareResult struct {
 	catalog.RuntimeResult
-	Providers string `json:"providers"`
-	Outbounds string `json:"outbounds"`
-	Inbound   string `json:"inbound"`
-	Backend   string `json:"backend"`
+	Providers string             `json:"providers"`
+	Outbounds string             `json:"outbounds"`
+	Inbound   string             `json:"inbound"`
+	Backend   string             `json:"backend"`
+	Network   *NetworkEvaluation `json:"-"`
 }
 
 // AppPolicy 描述分应用代理的持久设置。
@@ -141,6 +143,19 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 	if err != nil {
 		return PrepareResult{}, err
 	}
+	network, err := configuredNetwork(ctx, options)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	if network.DesiredMode == "Direct" {
+		if err := validateDirectRouting(options); err != nil {
+			return PrepareResult{}, err
+		}
+	}
+	config, err = config.WithDNSBypass(network.DesiredMode == "Direct")
+	if err != nil {
+		return PrepareResult{}, err
+	}
 	missingPackages, err := inbound.WriteAtomic(ctx, inboundPath, config)
 	if err != nil {
 		return PrepareResult{}, err
@@ -148,28 +163,14 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 	for _, ref := range missingPackages {
 		logService(options, "WARN", "inbound.package", "skipped", "分应用代理跳过未安装应用: %s", ref.String())
 	}
-	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, Inbound: inboundPath, Backend: config.Backend}, nil
+	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, Inbound: inboundPath, Backend: config.Backend, Network: &network}, nil
 }
 
-func saveSelection(ctx context.Context, options Options, selection moduleconfig.Selection) error {
-	module, err := moduleconfig.LoadModule(options.ModuleConfig)
-	if err != nil {
-		return err
-	}
-	if module.Selection == selection {
-		return nil
-	}
-	return options.updateModule(ctx, selection.Updates())
-}
-
-func (options Options) updateModule(ctx context.Context, updates map[string]string) error {
+func (options Options) updateSelection(ctx context.Context, selection moduleconfig.Selection) error {
 	if editor := options.configEditors[filepath.Clean(options.ModuleConfig)]; editor != nil {
-		return editor.Update(updates, func(candidate string) error {
-			_, err := moduleconfig.LoadModule(candidate)
-			return err
-		})
+		return editor.UpdateSelection(selection)
 	}
-	return moduleconfig.UpdateModule(ctx, options.ModuleConfig, updates)
+	return moduleconfig.UpdateSelection(ctx, options.ModuleConfig, selection)
 }
 
 // Check 生成隔离运行时配置并执行 sing-box check。
@@ -224,7 +225,7 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 		return nil, err
 	}
 	if selection != module.Selection {
-		if err := options.updateModule(ctx, selection.Updates()); err != nil {
+		if err := options.updateSelection(ctx, selection); err != nil {
 			return nil, err
 		}
 	}
@@ -548,7 +549,7 @@ func applyCatalogChange(ctx, localContext context.Context, options Options, save
 		return "", false, err
 	}
 	if selection != saved {
-		if err := options.updateModule(localContext, selection.Updates()); err != nil {
+		if err := options.updateSelection(localContext, selection); err != nil {
 			return "", false, err
 		}
 	}
@@ -779,7 +780,7 @@ func workerOptions(options Options) worker.Options {
 		ProgressDir:         options.ProgressDir,
 		PIDFile:             options.WorkerPIDFile,
 		LogFile:             options.WorkerLogFile,
-		ModuleConf:          options.ModuleConfig,
+		ModuleConfig:        options.ModuleConfig,
 		SingBoxPath:         options.SingBoxPath,
 		ServiceAddress:      options.ServiceAddress,
 		ServiceSecret:       options.ServiceSecret,

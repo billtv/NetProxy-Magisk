@@ -19,6 +19,7 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -48,7 +49,10 @@ var configSections = []string{
 }
 
 func configSection(target string) string {
-	if section, found := strings.CutPrefix(target, "inbound/"); found && (section == "backend" || section == "app" || section == "ebpf" || section == "tun") {
+	if section, found := strings.CutPrefix(target, "module/"); found && (section == "wifi" || section == "auto_start") {
+		return section
+	}
+	if section, found := strings.CutPrefix(target, "inbound/"); found && (section == "backend" || section == "root_policy" || section == "app" || section == "ebpf" || section == "tun") {
 		return section
 	}
 	section, hasPrefix := strings.CutPrefix(target, "singbox/")
@@ -65,7 +69,7 @@ func ListConfigs(options Options) ([]ConfigDocument, error) {
 	}
 	result := make([]ConfigDocument, 0)
 	result = append(result, ConfigDocument{ID: "inbound", Filename: "inbound.json", Category: "inbound", Editable: true})
-	for _, section := range []string{"backend", "app", "ebpf", "tun"} {
+	for _, section := range []string{"backend", "root_policy", "app", "ebpf", "tun"} {
 		result = append(result, ConfigDocument{ID: "inbound/" + section, Filename: section, Category: "inbound", Editable: true, Section: section})
 	}
 	if _, err := os.Stat(paths.SingBoxConfig(options.SingBoxDir)); err == nil {
@@ -266,6 +270,7 @@ func applyConfigLocked(ctx context.Context, options Options, target, destination
 	section := configSection(target)
 	var current []byte
 	inboundTarget := target == "inbound" || strings.HasPrefix(target, "inbound/")
+	moduleTarget := target == "module" || strings.HasPrefix(target, "module/")
 	if section != "" || expectedRevision != "" || inboundTarget {
 		var err error
 		current, err = os.ReadFile(destination)
@@ -273,14 +278,14 @@ func applyConfigLocked(ctx context.Context, options Options, target, destination
 			return "", err
 		}
 	}
-	if inboundTarget && section != "" {
+	if (inboundTarget || moduleTarget) && section != "" {
 		fragment, err := configObject(replacement)
 		if err != nil {
 			return "", err
 		}
 		value, found := fragment[section]
 		if !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return "", errors.New("入站分区必需，不能删除或设置为 null")
+			return "", errors.New("配置分区必需，不能删除或设置为 null")
 		}
 	}
 	content, revision, err := prepareConfigEdit(current, replacement, section, expectedRevision)
@@ -299,8 +304,11 @@ func applyConfigLocked(ctx context.Context, options Options, target, destination
 	if err := os.WriteFile(candidatePath, content, 0o600); err != nil {
 		return "", err
 	}
+	var moduleConfig moduleconfig.ModuleConfig
 	if inboundTarget {
 		err = validateInboundTree(ctx, options, candidatePath, content, section)
+	} else if moduleTarget {
+		moduleConfig, err = moduleconfig.ParseModule(content)
 	} else if section != "" {
 		err = validateSingBoxTree(ctx, options, candidatePath)
 	} else {
@@ -313,13 +321,13 @@ func applyConfigLocked(ctx context.Context, options Options, target, destination
 		return revision, nil
 	}
 	applyRuntime := true
+	selectionChanged := false
 	switchBackend := false
-	if target == "module" {
+	if moduleTarget {
 		previous, previousErr := moduleconfig.LoadModule(destination)
-		next, nextErr := moduleconfig.LoadModule(candidatePath)
-		if previousErr == nil && nextErr == nil {
-			previous.AutoStart = next.AutoStart
-			applyRuntime = previous != next
+		if previousErr == nil {
+			selectionChanged = previous.Selection != moduleConfig.Selection
+			applyRuntime = selectionChanged || !previous.WiFi.Equal(moduleConfig.WiFi)
 		}
 	}
 	if inboundTarget {
@@ -383,28 +391,61 @@ func applyConfigLocked(ctx context.Context, options Options, target, destination
 		if err := transaction.commit(); err != nil {
 			return "", errors.Join(fmt.Errorf("提交配置事务失败: %w", err), transaction.rollback())
 		}
+		if moduleTarget {
+			_ = worker.Wake(workerOptions(options))
+		}
 		return revision, nil
-	}
-	if err := transaction.setPhase("reload_started"); err != nil {
-		return "", rollbackConfigApply(options, transaction, fmt.Errorf("记录配置 reload 阶段失败: %w", err))
 	}
 	apply := configReload
 	if transaction.journal.Action == "switch" {
 		apply = configStart
 	}
-	if err := apply(ctx, options); err != nil {
-		return "", rollbackConfigApply(options, transaction, fmt.Errorf("配置应用失败: %w", err))
+	reload := func(applyContext context.Context, applyOptions Options) error {
+		if transaction.journal.Action == "mode" {
+			transaction.journal.Action = "reload"
+		}
+		if applyOptions.networkEvaluation != nil {
+			transaction.journal.Mode = applyOptions.networkEvaluation.RuntimeMode
+		}
+		if err := transaction.setPhase("reload_started"); err != nil {
+			return err
+		}
+		return apply(applyContext, applyOptions)
 	}
-	if target == "module" {
+	var applyErr error
+	if moduleTarget {
+		if !selectionChanged {
+			previousMode, modeErr := service.ReadRuntimeMode(ctx, networkControlOptions(options))
+			if modeErr != nil {
+				return "", rollbackConfigApply(options, transaction, modeErr)
+			}
+			transaction.journal.Mode, transaction.journal.Action = previousMode, "mode"
+			if err := transaction.setPhase("mode_started"); err != nil {
+				return "", rollbackConfigApply(options, transaction, err)
+			}
+			_, applyErr = applyConfiguredNetwork(ctx, options, reload)
+		} else {
+			applyErr = reload(ctx, options)
+		}
+	} else {
+		applyErr = reload(ctx, options)
+	}
+	if applyErr != nil {
+		return "", rollbackConfigApply(options, transaction, fmt.Errorf("配置应用失败: %w", applyErr))
+	}
+	if moduleTarget {
 		// reload 可能校正已失效的节点选择，revision 必须对应锁内最终内容。
-		applied, err := os.ReadFile(destination)
+		applied, err := ReadConfig(options, target)
 		if err != nil {
 			return "", rollbackAfterCommitFailure(ctx, options, transaction, err)
 		}
-		revision = configRevision(applied)
+		revision = applied["revision"]
 	}
 	if err := transaction.commit(); err != nil {
 		return "", rollbackAfterCommitFailure(ctx, options, transaction, err)
+	}
+	if moduleTarget {
+		_ = worker.Wake(workerOptions(options))
 	}
 	return revision, nil
 }
@@ -414,11 +455,6 @@ func rollbackAfterCommitFailure(ctx context.Context, options Options, transactio
 }
 
 func validateConfig(ctx context.Context, options Options, target, candidate string, content []byte) error {
-	switch target {
-	case "module":
-		_, err := moduleconfig.LoadModule(candidate)
-		return err
-	}
 	if !jsontext.Value(content).IsValid() {
 		return errors.New("配置不是有效 JSON")
 	}
@@ -456,7 +492,7 @@ func validateConfig(ctx context.Context, options Options, target, candidate stri
 }
 
 func validateInboundTree(ctx context.Context, options Options, candidate string, content []byte, section string) error {
-	if section == "backend" || section == "app" {
+	if section == "backend" || section == "root_policy" || section == "app" {
 		if _, err := inbound.Parse(content); err != nil {
 			return err
 		}
@@ -635,9 +671,9 @@ func copyDirectory(source, destination string) error {
 // ResolveConfig 将客户端配置 ID 安全解析为模块内文件。
 func ResolveConfig(options Options, target string) (string, error) {
 	switch target {
-	case "module":
+	case "module", "module/wifi", "module/auto_start":
 		return options.ModuleConfig, nil
-	case "inbound", "inbound/backend", "inbound/app", "inbound/ebpf", "inbound/tun":
+	case "inbound", "inbound/backend", "inbound/root_policy", "inbound/app", "inbound/ebpf", "inbound/tun":
 		return options.InboundConfig, nil
 	case "singbox/config.json":
 		return paths.SingBoxConfig(options.SingBoxDir), nil

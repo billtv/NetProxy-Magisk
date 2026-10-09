@@ -58,9 +58,9 @@ func TestPublicCommandsKeepSingleJSONContract(t *testing.T) {
 	options.WorkerPIDFile = filepath.Join(root, "state", "worker.pid")
 	options.WiFiStateFile = filepath.Join(root, "state", "wifi_state")
 	for path, content := range map[string]string{
-		options.ModuleConfig:                             "ACTIVE_GROUP_ID=default\n",
-		options.InboundConfig:                            `{"backend":"ebpf","app":{"enabled":false,"mode":"blacklist","proxy_apps":[],"bypass_apps":[]},"ebpf":{"type":"ebpf","tag":"netproxy-in","local":{"enabled":true},"shared":{"enabled":false}},"tun":{"type":"tun","tag":"netproxy-in","interface_name":"netproxy","address":["172.19.0.1/30"],"auto_route":true,"auto_redirect":true}}`,
-		filepath.Join(options.SingBoxDir, "config.json"): "{}\n",
+		options.ModuleConfig:                             "{\"selection\":{\"group_id\":\"default\"}}",
+		options.InboundConfig:                            `{"backend":"ebpf","root_policy":"default","app":{"enabled":false,"mode":"blacklist","proxy_apps":[],"bypass_apps":[]},"ebpf":{"type":"ebpf","tag":"netproxy-in","local":{"enabled":true},"shared":{"enabled":false}},"tun":{"type":"tun","tag":"netproxy-in","interface_name":"netproxy","address":["172.19.0.1/30"],"auto_route":true,"auto_redirect":true}}`,
+		filepath.Join(options.SingBoxDir, "config.json"): `{"experimental":{"clash_api":{"default_mode":"Rule"}},"route":{"rules":[{"clash_mode":["Rule","Proxy","Direct","RuleAllowAds"]}]}}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -90,13 +90,19 @@ func TestPublicCommandsKeepSingleJSONContract(t *testing.T) {
 		{"node use default/NODE", "node.selected", 0},
 		{"sub list", "subscription.list", 0},
 		{"mode", "mode.current", 0},
+		{"mode Proxy", "mode.changed", 0},
+		{"mode RuleAllowAds", "mode.changed", 0},
 		{"mode Rule", "mode.changed", 0},
-		{"mode global", "mode.invalid", 1},
+		{"mode proxy", "mode.invalid", 1},
+		{"mode Global", "mode.invalid", 1},
+		{"mode AllowAds", "mode.invalid", 1},
 		{"mode Rule extra", "usage.invalid", 2},
 		{"network evaluate --type not_wifi", "network.evaluated", 0},
 		{"app list", "app.list", 0},
 		{"config list", "config.list", 0},
 		{"config read module", "config.read", 0},
+		{"config read module/wifi", "config.read", 0},
+		{"config read module/auto_start", "config.read", 0},
 		{"logs show service", "logs.show", 0},
 		{"node get invalid", "node.ref_invalid", 2},
 		{"catalog show", "usage.invalid", 2},
@@ -136,8 +142,16 @@ func TestPublicCommandsKeepSingleJSONContract(t *testing.T) {
 				if err := json.Unmarshal(response.Data, &data); err != nil || string(data["state"]) != `"stopped"` {
 					t.Fatalf("服务状态必须直接位于 data: %s: %v", response.Data, err)
 				}
-				if string(data["configured_outbound_mode"]) != `"Rule"` || string(data["available_outbound_modes"]) != `["Rule"]` {
+				if string(data["configured_outbound_mode"]) != `"Rule"` || string(data["available_outbound_modes"]) != `["Proxy","RuleAllowAds","Rule","Direct"]` {
 					t.Fatalf("模式字段未使用主配置: %s", response.Data)
+				}
+			}
+			if test.code == "mode.changed" {
+				var data struct {
+					Mode string `json:"mode"`
+				}
+				if err := json.Unmarshal(response.Data, &data); err != nil || data.Mode != strings.TrimPrefix(test.args, "mode ") {
+					t.Fatalf("模式名称未原样返回: %s: %v", response.Data, err)
 				}
 			}
 		})
@@ -182,7 +196,7 @@ func TestEBPFDiagnosticJSONContract(t *testing.T) {
 		{"invalid-raw", "tun", "supported", true, false, "ebpf.status_invalid", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			config := `{"backend":"` + test.backend + `","app":{"enabled":false,"mode":"blacklist","proxy_apps":[],"bypass_apps":[]},"ebpf":{"type":"ebpf","tag":"netproxy-in","local":{"enabled":true},"shared":{"enabled":false}},"tun":{"type":"tun","tag":"netproxy-in","interface_name":"netproxy","address":["172.19.0.1/30"],"auto_route":true,"auto_redirect":true}}`
+			config := `{"backend":"` + test.backend + `","root_policy":"default","app":{"enabled":false,"mode":"blacklist","proxy_apps":[],"bypass_apps":[]},"ebpf":{"type":"ebpf","tag":"netproxy-in","local":{"enabled":true},"shared":{"enabled":false}},"tun":{"type":"tun","tag":"netproxy-in","interface_name":"netproxy","address":["172.19.0.1/30"],"auto_route":true,"auto_redirect":true}}`
 			if err := os.WriteFile(options.InboundConfig, []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -251,5 +265,43 @@ func TestEBPFDiagnosticJSONContract(t *testing.T) {
 				t.Fatalf("诊断不应生成运行时或启动服务: %v", err)
 			}
 		})
+	}
+}
+
+func TestSavedWiFiCommandContract(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "cmd")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", binary, "../../internal/inbound/testdata/fake-package")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("构建 Wi-Fi fixture 失败: %v\n%s", err, output)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NETPROXY_TEST_COMMAND_MODE", "wifi-list")
+	capture, err := os.CreateTemp(root, "stdout-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Close()
+	previous := os.Stdout
+	os.Stdout = capture
+	defer func() { os.Stdout = previous }()
+	status := (&cli{}).run(t.Context(), []string{"--json", "network", "wifi-list"})
+	content, err := os.ReadFile(capture.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Schema int    `json:"schema"`
+		OK     bool   `json:"ok"`
+		Code   string `json:"code"`
+		Data   struct {
+			SSIDs []string `json:"ssids"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(content, &response); err != nil || status != 0 || response.Schema != 1 || !response.OK || response.Code != "network.wifi_list" || len(response.Data.SSIDs) != 1 || response.Data.SSIDs[0] != "Home, Wi-Fi" {
+		t.Fatalf("已保存 Wi-Fi 契约错误: %s %v", content, err)
 	}
 }

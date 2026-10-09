@@ -21,13 +21,13 @@ su -c '/data/adb/modules/netproxy/netproxyctl logs show core 100'
 
 先确认节点本身可用。服务停止时会启动临时核心测速，首次准备可能比运行中稍慢；若所有节点同时超时，请检查核心日志、DNS、网络权限和 Provider 配置，而不是只提高超时时间。
 
-## Global 模式为什么仍有直连
+## 代理模式为什么仍有直连
 
-eBPF 的 `local.bypass_rule_set`、`shared.bypass_rule_set`、私网绕过和应用名单可以在普通路由前放行；TUN 的原生路由范围、接口和地址排除也会影响接管。严格测试 Global 时检查实际后端的绕过与筛选并重启核心，而不是只修改出站模式。
+eBPF 的 `local.bypass_rule_set`、`shared.bypass_rule_set`、私网绕过和应用名单可以在普通路由前放行；TUN 的原生路由范围、接口和地址排除也会影响接管。`Proxy` 模式只处理已进入 sing-box 的流量；测试时检查实际后端的绕过与筛选并重启核心，而不是只修改出站模式。
 
-## 升级提示缺少 inbound.json
+## 升级提示缺少 module.json 或 inbound.json
 
-保留全数据要求当前 `config/inbound/inbound.json` 完整。安装器不检测版本或迁移旧文件，也不静默补默认；选择“仅保留节点与订阅”可保留 Catalog 与日志、恢复默认配置，或主动选择“全新安装”。
+保留全数据要求当前 `config/module.json`、`config/inbound/inbound.json`、主配置与 Catalog 完整。旧格式用户只能选择“仅保留节点与订阅”或“全新安装”；前者保留 Catalog 与日志、恢复默认配置。安装器不检测版本、不读取或迁移旧格式，也不静默补默认。
 
 ## DNS 泄漏是什么
 

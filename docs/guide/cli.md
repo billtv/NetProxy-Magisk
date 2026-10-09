@@ -48,12 +48,12 @@ su -c '/data/adb/modules/netproxy/netproxyctl service reload'
 
 su -c '/data/adb/modules/netproxy/netproxyctl mode'
 su -c '/data/adb/modules/netproxy/netproxyctl mode Rule'
-su -c '/data/adb/modules/netproxy/netproxyctl mode Global'
+su -c '/data/adb/modules/netproxy/netproxyctl mode Proxy'
 su -c '/data/adb/modules/netproxy/netproxyctl mode Direct'
-su -c '/data/adb/modules/netproxy/netproxyctl mode AllowAds'
+su -c '/data/adb/modules/netproxy/netproxyctl mode RuleAllowAds'
 ```
 
-`mode` 返回主配置默认模式、可选模式及运行时实际模式。模式名称与内核一致，来自主配置规则，不限定为以上四种。
+`mode` 返回主配置默认模式、可选模式及运行时实际模式。默认配置中的 `Rule`、`Proxy`、`Direct`、`RuleAllowAds` 分别对应规则、代理、直连、规则（允许广告）。模式名称来自主配置规则，不限定为以上四种；配置、CLI 和 API 使用同一名称。
 
 `service status.data.outbound_mode` 是核心当前实际模式；`configured_outbound_mode` 来自主配置的 `experimental.clash_api.default_mode`，`available_outbound_modes` 是可选模式列表。服务停止时显示默认模式，运行时 API 不可用则显示 `unknown`。Wi-Fi 策略只改变运行时结果，不覆盖默认模式。
 
@@ -106,7 +106,13 @@ su -c '/data/adb/modules/netproxy/netproxyctl network evaluate --type wifi --ssi
 su -c '/data/adb/modules/netproxy/netproxyctl ebpf status configured'
 su -c '/data/adb/modules/netproxy/netproxyctl ebpf status all --raw'
 
+su -c '/data/adb/modules/netproxy/netproxyctl network wifi-list'
+su -c '/data/adb/modules/netproxy/netproxyctl network evaluate --type wifi --ssid "Home Wi-Fi"'
+
 su -c '/data/adb/modules/netproxy/netproxyctl config list'
+su -c '/data/adb/modules/netproxy/netproxyctl config read module'
+su -c '/data/adb/modules/netproxy/netproxyctl config read module/wifi'
+su -c '/data/adb/modules/netproxy/netproxyctl config read module/auto_start'
 su -c '/data/adb/modules/netproxy/netproxyctl config read inbound'
 su -c '/data/adb/modules/netproxy/netproxyctl config read inbound/backend'
 su -c '/data/adb/modules/netproxy/netproxyctl config read inbound/ebpf'
@@ -123,11 +129,15 @@ su -c '/data/adb/modules/netproxy/netproxyctl logs export /sdcard/Download/netpr
 
 `ebpf status` 默认返回整理后的 eBPF 能力诊断，`--raw` 返回 sing-box 原始输出；不代表实际 backend，没有 `tun status` 命令。诊断包不会导出 Catalog 节点内容。
 
+`network wifi-list` 仅查询已保存的 Wi-Fi 名称，不扫描附近网络；JSON 的 `data.ssids` 为字符串数组。`network evaluate` 按提供的真实网络状态应用策略，类型为 `wifi` 或 `not_wifi`。
+
 `config list` 同时列出主配置、分区、本地规则和只读运行时。`singbox/dns` 的候选内容必须使用 `{"dns": {...}}`，`{}` 表示删除该字段；不能包含其他分区。完整替换使用 `singbox/config.json`。
 
-受管入站使用 `inbound` 完整目标与 `inbound/backend`、`inbound/app`、`inbound/ebpf`、`inbound/tun` 分区；分区保留对应顶层字段，例如 `{"backend":"tun"}`，不能用 `{}` 删除。它们共用同一磁盘文件，没有 `config ebpf` 目标。实际入站只读目标为 `runtime/inbound.json`，另保留 `runtime/providers.json` 与 `runtime/outbounds.json`。
+模块设置的唯一文件是 `config/module.json`，`module` 目标读取或替换整份 JSON。`module/wifi` 与 `module/auto_start` 分别使用 `{"wifi": {...}}`、`{"auto_start": true}`，拥有独立 revision；在同一个 `module.json.lock` 内合并最新其他字段，保留并发节点选择。分区不能用 `{}` 删除或携带其他顶层字段。没有 `module/selection` 目标，选节点使用 `node use`；单独保存 `auto_start` 只影响下次开机。
 
-`config list` 的四个入站目标属于 `category: "inbound"`。运行时准备结果使用 `inbound` 路径字段与 `backend`，不再使用旧 `ebpf` 字段。切换强杀时中止并保留 journal，需要设备重启后再恢复，不做兜底清理。
+受管入站使用 `inbound` 完整目标与 `inbound/backend`、`inbound/root_policy`、`inbound/app`、`inbound/ebpf`、`inbound/tun` 分区；分区保留对应顶层字段，例如 `{"backend":"tun"}`，不能用 `{}` 删除。Root 策略可用 `{"root_policy":"default"}`、`include`（接管）或 `exclude`（绕过），独立于应用名单。它们共用同一磁盘文件，没有 `config ebpf` 目标。实际入站只读目标为 `runtime/inbound.json`，另保留 `runtime/providers.json` 与 `runtime/outbounds.json`。
+
+`config list` 的六个入站目标属于 `category: "inbound"`。运行时准备结果使用 `inbound` 路径字段与 `backend`。切换强杀时中止并保留 journal，需要设备重启后再恢复，不做兜底清理。
 
 `config read` 返回 `content` 和 `revision`。编辑期间需要防止覆盖并发修改时，在目标前传入读到的版本：
 

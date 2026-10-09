@@ -37,6 +37,45 @@ func builtFilters(t *testing.T, built BuildResult) (include []uint32, includeRan
 	return native.IncludeUID, native.IncludeUIDRange, native.ExcludeUID, native.ExcludeUIDRange
 }
 
+func TestDNSBypassDoesNotChangeSavedPreferences(t *testing.T) {
+	for _, backend := range []string{"ebpf", "tun"} {
+		original := fixture(t, backend, `{"type":"ebpf","tag":"netproxy-in","local":{"enabled":true,"dns_mode":"respect_policy"},"shared":{"enabled":false,"dns_mode":"hijack"}}`, strings.TrimSuffix(testTUN, "}")+`,"dns_mode":"native"}`)
+		saved := encodeConfig(t, original)
+		effective, err := original.WithDNSBypass(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		built, err := effective.Build(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, _ := json.Marshal(built.Runtime)
+		state, err := RuntimeDNSState(content)
+		wanted, _ := effective.DNSState()
+		if err != nil || state != wanted {
+			t.Fatalf("%s: %s %s %v", backend, state, wanted, err)
+		}
+		if backend == "ebpf" && (strings.Contains(string(content), `"dns_mode":"respect_policy"`) || strings.Contains(string(content), `"dns_mode":"hijack"`) || !strings.Contains(string(content), `"shared":{"enabled":false}`)) {
+			t.Fatal(string(content))
+		}
+		if backend == "tun" && !strings.Contains(string(content), `"dns_mode":"disabled"`) {
+			t.Fatal(string(content))
+		}
+		if !bytes.Equal(saved, encodeConfig(t, original)) {
+			t.Fatal("改变了保存偏好")
+		}
+		restored, _ := original.WithDNSBypass(false)
+		if !bytes.Equal(saved, encodeConfig(t, restored)) {
+			t.Fatal("未恢复原 DNS 配置")
+		}
+	}
+	for _, bad := range []string{`{}`, `{"inbounds":[]}`, `{"inbounds":[{},{}]}`, `{"inbounds":[{"type":"other"}]}`} {
+		if _, err := RuntimeDNSState([]byte(bad)); err == nil {
+			t.Fatalf("接受了无效运行时: %s", bad)
+		}
+	}
+}
+
 func addFilters(t *testing.T, config *Config, filters string) {
 	t.Helper()
 	if config.Backend == "ebpf" {
@@ -174,6 +213,122 @@ func TestNativeUIDPolicyExcludesRootAndEmptyWhitelist(t *testing.T) {
 	options.ExcludeUID = []ranges.Range[uint32]{{Start: 0, End: 4294967294}}
 	if got := options.ExcludedRanges(); !slices.Equal(got, options.ExcludeUID) {
 		t.Fatalf("空白名单未排除全部有效 UID: %v", got)
+	}
+}
+
+func TestRootPolicyOverridesOnlyRootOnBothBackends(t *testing.T) {
+	for _, backend := range []string{"ebpf", "tun"} {
+		for _, test := range []struct {
+			name, policy, mode, filters string
+			apps                        bool
+			include, exclude            []uint32
+			includeRange, excludeRange  []string
+		}{
+			{name: "default-no-forced-root", policy: "default", mode: "whitelist", apps: true, include: []uint32{10123}},
+			{name: "whitelist-includes-root", policy: "include", mode: "whitelist", apps: true, include: []uint32{0, 10123}},
+			{name: "whitelist-bypasses-root", policy: "exclude", mode: "whitelist", apps: true, include: []uint32{10123}, exclude: []uint32{0}},
+			{name: "blacklist-includes-root-without-restricting-others", policy: "include", mode: "blacklist", apps: true, exclude: []uint32{10123}},
+			{name: "blacklist-bypasses-root", policy: "exclude", mode: "blacklist", apps: true, exclude: []uint32{0, 10123}},
+			{name: "app-disabled-root-bypass", policy: "exclude", exclude: []uint32{0}},
+			{name: "app-disabled-root-include-unrestricted", policy: "include"},
+			{name: "android-user-inclusion-does-not-restrict-apps", policy: "include", filters: `"include_android_user":[0,10]`},
+			{name: "native-exclude-root", policy: "include", filters: `"exclude_uid":[0,23]`, exclude: []uint32{23}},
+			{name: "native-whitelist", policy: "include", filters: `"include_uid":23`, include: []uint32{0, 23}},
+			{name: "range-keeps-other-uids", policy: "include", filters: `"include_uid_range":"10000:10123","exclude_uid_range":["0:20","0:1","23:30"]`, include: []uint32{0}, includeRange: []string{"10000:10123"}, excludeRange: []string{"1:20", "23:30"}},
+			{name: "root-range-singleton", policy: "include", filters: `"exclude_uid_range":"0:1"`, exclude: []uint32{1}},
+			{name: "root-only-native-whitelist-bypassed", policy: "exclude", filters: `"include_uid":0`, include: []uint32{0}, exclude: []uint32{0}},
+		} {
+			t.Run(backend+"/"+test.name, func(t *testing.T) {
+				config := fixture(t, backend, "", "")
+				config.RootPolicy = test.policy
+				if test.apps {
+					config.App = AppPolicy{Enabled: true, Mode: test.mode, ProxyApps: []string{"0:com.example.app"}, BypassApps: []string{"0:com.example.app"}}
+				}
+				if test.filters != "" {
+					addFilters(t, &config, test.filters)
+				}
+				original := encodeConfig(t, config)
+				built, err := config.BuildWithResolver(func([]PackageRef) (PackageUIDResolution, error) {
+					return PackageUIDResolution{UIDs: []uint32{10123}}, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				include, includeRange, exclude, excludeRange := builtFilters(t, built)
+				if !slices.Equal(include, test.include) || !slices.Equal(includeRange, test.includeRange) || !slices.Equal(exclude, test.exclude) || !slices.Equal(excludeRange, test.excludeRange) {
+					t.Fatalf("Root 策略改变其他 UID: %v %v %v %v", include, includeRange, exclude, excludeRange)
+				}
+				if !bytes.Equal(original, encodeConfig(t, config)) {
+					t.Fatal("Root 投影修改持久模板")
+				}
+			})
+		}
+		config := fixture(t, backend, "", "")
+		config.RootPolicy = "include"
+		config.App = AppPolicy{Enabled: true, Mode: "whitelist"}
+		built, err := config.BuildWithResolver(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		include, _, _, excludeRange := builtFilters(t, built)
+		if !slices.Equal(include, []uint32{0}) || !slices.Equal(excludeRange, []string{"1:4294967294"}) {
+			t.Fatal("空白名单未仅接管 Root", string(built.Runtime.Inbounds[0]))
+		}
+	}
+}
+
+func TestRootPolicyEffectiveChangesAndSharedOnly(t *testing.T) {
+	for _, backend := range []string{"ebpf", "tun"} {
+		config := fixture(t, backend, "", "")
+		original, err := config.EffectiveContent()
+		if err != nil {
+			t.Fatal(err)
+		}
+		config.RootPolicy = "include"
+		unchanged, err := config.EffectiveContent()
+		if err != nil || !bytes.Equal(original, unchanged) {
+			t.Fatal("不限 UID 时接管 Root 不应改变有效策略", err)
+		}
+		config.RootPolicy = "exclude"
+		changed, err := config.EffectiveContent()
+		if err != nil || bytes.Equal(original, changed) {
+			t.Fatal("绕过 Root 未影响有效策略", err)
+		}
+	}
+	config := fixture(t, "ebpf", `{"type":"ebpf","tag":"netproxy-in","local":{"enabled":false},"shared":{"enabled":true,"interface":"ap0"}}`, "")
+	original, _ := config.EffectiveContent()
+	for _, policy := range []string{"include", "exclude"} {
+		config.RootPolicy = policy
+		effective, err := config.EffectiveContent()
+		if err != nil || !bytes.Equal(original, effective) {
+			t.Fatal("共享网络应用了本机 Root 策略", err)
+		}
+		built, err := config.BuildWithResolver(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		include, includeRange, exclude, excludeRange := builtFilters(t, built)
+		if len(include)+len(includeRange)+len(exclude)+len(excludeRange) != 0 {
+			t.Fatal("禁用本机路径仍输出 Root 策略")
+		}
+	}
+}
+
+func TestRootPolicyRespectsNativeAndroidUserScope(t *testing.T) {
+	for _, backend := range []string{"ebpf", "tun"} {
+		config := fixture(t, backend, "", "")
+		addFilters(t, &config, `"include_android_user":10`)
+		config.RootPolicy = "include"
+		if _, err := Parse(encodeConfig(t, config)); err == nil {
+			t.Fatal("原生用户范围排除 Root 时仍接受接管")
+		}
+		if _, err := config.BuildWithResolver(nil); err == nil {
+			t.Fatal("Root 冲突未阻止运行时生成")
+		}
+		config.RootPolicy = "exclude"
+		if _, err := config.BuildWithResolver(nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

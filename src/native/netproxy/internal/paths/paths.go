@@ -20,7 +20,11 @@ func New(root string) Layout {
 	if strings.TrimSpace(root) == "" {
 		root = "."
 	}
-	return Layout{moduleRoot: filepath.Clean(root), devRoot: defaultDevRoot}
+	devRoot := os.Getenv("NETPROXY_DEV_ROOT")
+	if devRoot == "" {
+		devRoot = defaultDevRoot
+	}
+	return Layout{moduleRoot: filepath.Clean(root), devRoot: filepath.Clean(devRoot)}
 }
 
 // Default 返回当前模块的默认路径布局。
@@ -51,7 +55,7 @@ func (l Layout) Data() string { return filepath.Join(l.moduleRoot, "data") }
 func (l Layout) Catalog() string { return filepath.Join(l.Data(), "catalog") }
 
 // ModuleConfig 返回模块配置文件路径。
-func (l Layout) ModuleConfig() string { return filepath.Join(l.Config(), "module.conf") }
+func (l Layout) ModuleConfig() string { return filepath.Join(l.Config(), "module.json") }
 
 // InboundConfig 返回受管入站配置文件路径。
 func (l Layout) InboundConfig() string { return filepath.Join(l.Config(), "inbound", "inbound.json") }

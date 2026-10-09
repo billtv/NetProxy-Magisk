@@ -45,9 +45,9 @@
     <string name="dashboard_traffic">↑ %1$s   ↓ %2$s</string>
     <string name="dashboard_outbound_mode">出站模式</string>
     <string name="dashboard_mode_rule">规则</string>
-    <string name="dashboard_mode_global">全局</string>
+    <string name="dashboard_mode_proxy">代理</string>
     <string name="dashboard_mode_direct">直连</string>
-    <string name="dashboard_mode_allow_ads">允许广告</string>
+    <string name="dashboard_mode_rule_allow_ads">规则（允许广告）</string>
     <string name="dashboard_mode_unknown">实际模式未知</string>
     <string name="dashboard_current_node">当前节点</string>
     <string name="dashboard_not_selected">未选择</string>
@@ -162,11 +162,10 @@
     <string name="subscription_editor_url">订阅链接</string>
     <string name="subscription_editor_update_interval">自动更新周期</string>
     <string name="subscription_editor_auto_update">自动更新</string>
-    <string name="subscription_editor_auto_update_summary">核心停止时也会按计划更新</string>
     <string name="subscription_editor_update_network">更新网络</string>
     <string name="subscription_editor_network_auto">自动</string>
-    <string name="subscription_editor_network_proxy">始终通过代理</string>
-    <string name="subscription_editor_network_direct">始终直连</string>
+    <string name="subscription_editor_network_proxy">代理</string>
+    <string name="subscription_editor_network_direct">直连</string>
     <string name="subscription_editor_filter_section">筛选与连接</string>
     <string name="subscription_editor_include">仅保留（正则，可选）</string>
     <string name="subscription_editor_exclude">排除（正则，可选）</string>
@@ -209,15 +208,13 @@
 
     <!-- Apps Control -->
     <string name="apps">应用</string>
-    <string name="proxy_apps">分应用代理</string>
-    <string name="app_proxy_mode">应用代理模式</string>
+    <string name="proxy_apps">应用代理</string>
+    <string name="app_proxy_mode">代理模式</string>
     <string name="no_apps_found">未找到应用</string>
     <string name="show_system_apps">显示系统应用</string>
-    <string name="proxy_mode_summary">选择如何过滤需要走代理的应用</string>
-    <string name="app_proxy_mode_blacklist">黑名单模式</string>
-    <string name="app_proxy_mode_whitelist">白名单模式</string>
+    <string name="app_proxy_mode_blacklist">黑名单</string>
+    <string name="app_proxy_mode_whitelist">白名单</string>
     <string name="proxy_mode_off">关闭</string>
-    <string name="app_proxy_disabled_hint">分应用代理已关闭</string>
     <string name="app_selected_first">选中优先</string>
     <string name="app_reverse_sort">逆向排序</string>
     <string name="app_show_package_name">显示包名</string>
@@ -352,13 +349,21 @@
     <string name="json_discard_changes">放弃更改</string>
 
     <!-- Settings: WiFi automatic switching -->
-    <string name="wifi_auto_switch_title">WiFi 自动切换</string>
-    <string name="wifi_auto_switch">按 WiFi 自动切换</string>
-    <string name="wifi_ssid_mode">名单模式</string>
+    <string name="wifi_auto_switch">Wi-Fi 自动切换</string>
+    <string name="wifi_policy_title">匹配策略</string>
+    <string name="wifi_mode_off">关闭</string>
+    <string name="wifi_blacklist_title">Wi-Fi 黑名单</string>
+    <string name="wifi_whitelist_title">Wi-Fi 白名单</string>
+    <string name="proxy_on_non_wifi">非 Wi-Fi 网络走代理</string>
+    <string name="wifi_add">添加 Wi-Fi</string>
+    <string name="wifi_edit">编辑 Wi-Fi</string>
+    <string name="wifi_name">Wi-Fi 名称</string>
+    <string name="wifi_empty">暂无 Wi-Fi 名称，点击右上角添加</string>
+    <string name="wifi_saved_failed">无法读取已保存 Wi-Fi，请手动输入</string>
+    <string name="wifi_saved_empty">没有可添加的已保存 Wi-Fi</string>
+    <string name="wifi_invalid_name">名称须为 1 至 32 个 UTF-8 字节，且不含控制字符</string>
     <string name="wifi_ssid_mode_blacklist">黑名单</string>
     <string name="wifi_ssid_mode_whitelist">白名单</string>
-    <string name="wifi_ssid_list">SSID 名单</string>
-    <string name="proxy_on_cellular">非 WiFi 网络走代理</string>
 
     <!-- eBPF 透明代理 -->
     <string name="ebpf_core_settings">eBPF 入站</string>
@@ -398,7 +403,6 @@
     <string name="settings_hint_interfaces">每行一个接口名称，例如 wlan2 或 wlan0</string>
     <string name="settings_hint_cidrs">每行一个 CIDR，例如 192.168.0.0/16 或 10.0.0.0/8</string>
     <string name="settings_hint_macs">每行一个 MAC 地址</string>
-    <string name="settings_hint_ssids">多个 SSID 请用英文逗号分隔</string>
     <!-- Apps: user scope labels -->
     <string name="app_users_label">用户 %1$s</string>
     <string name="percentage_value">%1$d%%</string>
@@ -546,6 +550,10 @@
     <string name="inbound_general">通用设置</string>
     <string name="inbound_backend">入站后端</string>
     <string name="inbound_full_json">编辑完整入站 JSON</string>
+    <string name="inbound_root_processes">Root 进程</string>
+    <string name="inbound_root_default">默认</string>
+    <string name="inbound_root_include">接管</string>
+    <string name="inbound_root_exclude">绕过</string>
     <string name="inbound_switch_title">切换入站后端？</string>
     <string name="inbound_switch_warning">服务将重启，连接会短暂中断。</string>
     <string name="inbound_reload">重新加载设置</string>

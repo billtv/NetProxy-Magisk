@@ -143,8 +143,12 @@ func StartService(ctx context.Context, options Options) (err error) {
 		if state.PID == int64(pid) && state.CoreStartedAtMillis == startedAt && state.ActiveBackend != "" {
 			identity = append(identity, ServiceIdentity{state.ActiveBackend, startedAt})
 		}
-		if _, err := syncConfiguredMode(ctx, options); err != nil {
+		if _, err := applyConfiguredNetwork(ctx, options, reloadNetworkConfig); err != nil {
 			return err
+		}
+		// 网络策略可能已经重载实例，不能再写回重载前的启动身份。
+		if refreshed, _ := ReadServiceState(options.StateFile); refreshed.CoreStartedAtMillis != state.CoreStartedAtMillis && refreshed.State == "ready" {
+			return nil
 		}
 		if err := writeServiceState(options.StateFile, "ready", int64(pid), startedAt/1000, readyAt, "", identity...); err != nil {
 			return err
@@ -164,7 +168,7 @@ func StartService(ctx context.Context, options Options) (err error) {
 	if err := checkPreparedConfiguration(ctx, options, prepared); err != nil {
 		return failServiceStart(options, 0, 0, "sing-box 配置检查失败", err)
 	}
-	if err := saveSelection(ctx, options, prepared.Selection); err != nil {
+	if err := options.updateSelection(ctx, prepared.Selection); err != nil {
 		return failServiceStart(options, 0, 0, "运行时选择状态同步失败", err)
 	}
 	return startPreparedService(ctx, options, prepared)
@@ -172,6 +176,7 @@ func StartService(ctx context.Context, options Options) (err error) {
 
 // 事务内只启动已经准备好的快照，不恢复或重建正在应用的 journal。
 func startPreparedService(ctx context.Context, options Options, prepared PrepareResult) (err error) {
+	options.networkEvaluation = prepared.Network
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -316,7 +321,7 @@ func startAppliedConfig(ctx context.Context, options Options) error {
 	if err := checkPreparedConfiguration(ctx, options, prepared); err != nil {
 		return err
 	}
-	if err := saveSelection(ctx, options, prepared.Selection); err != nil {
+	if err := options.updateSelection(ctx, prepared.Selection); err != nil {
 		return err
 	}
 	return startPreparedService(ctx, options, prepared)
@@ -343,6 +348,7 @@ func reloadConfigSnapshot(ctx context.Context, options Options, journal configAp
 }
 
 func reloadPreparedService(ctx context.Context, options Options, prepared PrepareResult, synchronizeSelection bool) error {
+	options.networkEvaluation = prepared.Network
 	state, _ := ReadServiceState(options.StateFile)
 	pid := service.FindProcess(options.SingBoxPath, int(state.PID))
 	if pid <= 0 {
@@ -364,7 +370,7 @@ func reloadPreparedService(ctx context.Context, options Options, prepared Prepar
 		return restoreReloadState(ctx, options, pid, oldStartedAt, state.ReadyAt, err)
 	}
 	if synchronizeSelection {
-		if err := saveSelection(ctx, options, prepared.Selection); err != nil {
+		if err := options.updateSelection(ctx, prepared.Selection); err != nil {
 			return restoreReloadState(ctx, options, pid, startedAt/1000, state.ReadyAt, err)
 		}
 		if err := syncSelection(ctx, options); err != nil {

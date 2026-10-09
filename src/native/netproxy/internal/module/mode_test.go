@@ -34,7 +34,7 @@ func writeModeConfig(t *testing.T, options Options, mode string) {
 		t.Fatal(err)
 	}
 	name, _ := json.Marshal(mode)
-	content := `{"experimental":{"clash_api":{"default_mode":` + string(name) + `,"secret":"fixture"},"cache_file":{"enabled":true}},"route":{"rules":[{"clash_mode":["Direct","Office"]},{"domain":"example.test","outbound":"Proxy"}]},"custom":{"keep":true}}`
+	content := `{"experimental":{"clash_api":{"default_mode":` + string(name) + `,"secret":"fixture"},"cache_file":{"enabled":true}},"route":{"rules":[{"clash_mode":"Direct","action":"route","outbound":"direct"},{"clash_mode":"Office"},{"domain":"example.test","outbound":"Proxy"}]},"custom":{"keep":true}}`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,9 +59,9 @@ func TestRuntimeModeReconciliation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			options := newTestOptions(t.TempDir())
 			writeModeConfig(t, options, test.config)
-			module := "WIFI_AUTO_SWITCH=0\n"
+			module := "{\"wifi\":{\"enabled\":false}}"
 			if test.wifi {
-				module = "WIFI_AUTO_SWITCH=1\nWIFI_SSID_MODE=blacklist\nWIFI_SSID_LIST=Home\n"
+				module = "{\"wifi\":{\"blacklist\":[\"Home\"],\"enabled\":true,\"mode\":\"blacklist\"}}"
 			}
 			if err := os.WriteFile(options.ModuleConfig, []byte(module), 0o600); err != nil {
 				t.Fatal(err)
@@ -132,7 +132,7 @@ func TestApplyModeStoppedUpdatesOnlyDefaultMode(t *testing.T) {
 	options := newTestOptions(t.TempDir())
 	options.SingBoxPath = filepath.Join(options.ModuleDir, "missing-core")
 	writeModeConfig(t, options, "Rule")
-	if err := os.WriteFile(options.ModuleConfig, []byte("AUTO_START=0\n"), 0o600); err != nil {
+	if err := os.WriteFile(options.ModuleConfig, []byte("{\"auto_start\":false}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path := paths.SingBoxConfig(options.SingBoxDir)
@@ -152,7 +152,7 @@ func TestApplyModeStoppedUpdatesOnlyDefaultMode(t *testing.T) {
 		t.Fatalf("覆盖了模式以外的配置: %s", after)
 	}
 	module, _ := os.ReadFile(options.ModuleConfig)
-	if string(module) != "AUTO_START=0\n" {
+	if string(module) != `{"auto_start":false}` {
 		t.Fatalf("修改了模块配置: %s", module)
 	}
 	for _, path := range []string{options.StateFile, options.WorkerPIDFile} {
@@ -160,8 +160,8 @@ func TestApplyModeStoppedUpdatesOnlyDefaultMode(t *testing.T) {
 			t.Fatalf("停服保存产生了运行副作用: %s %v", path, err)
 		}
 	}
-	if _, err := ApplyMode(t.Context(), options, "global"); err == nil {
-		t.Fatal("接受了配置中不存在的历史别名")
+	if _, err := ApplyMode(t.Context(), options, "proxy"); err == nil {
+		t.Fatal("接受了配置中不存在的模式")
 	}
 	unchanged, _ := os.ReadFile(path)
 	if string(unchanged) != string(after) {
@@ -205,7 +205,7 @@ func TestNetworkPolicyRejectsMissingDirectMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	targetCoreWrite(t, paths.SingBoxConfig(options.SingBoxDir), []byte(`{}`))
-	targetCoreWrite(t, options.ModuleConfig, []byte("WIFI_AUTO_SWITCH=1\nPROXY_ON_CELLULAR=0\n"))
+	targetCoreWrite(t, options.ModuleConfig, []byte("{\"wifi\":{\"enabled\":true,\"mode\":\"blacklist\",\"proxy_on_non_wifi\":false}}"))
 	_, err := EvaluateNetwork(t.Context(), options, "not_wifi", "")
 	structured, ok := errors.AsType[*service.Error](err)
 	if !ok || structured.Code != "mode.unavailable" {
@@ -253,9 +253,9 @@ func TestModeTargetCoreRestoresCacheAndReconcilesDefault(t *testing.T) {
 	if err := os.MkdirAll(options.SingBoxDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := fmt.Sprintf(`{"log":{"disabled":true},"experimental":{"cache_file":{"enabled":true,"path":"cache.db"},"clash_api":{"default_mode":"Rule"}},"services":[{"type":"api","listen":"127.0.0.1","listen_port":%d,"secret":"fixture"}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"clash_mode":["Rule","Global","Direct","Office"],"action":"route","outbound":"direct"}]}}`, address.Port)
+	content := fmt.Sprintf(`{"log":{"disabled":true},"experimental":{"cache_file":{"enabled":true,"path":"cache.db"},"clash_api":{"default_mode":"Rule"}},"services":[{"type":"api","listen":"127.0.0.1","listen_port":%d,"secret":"fixture"}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"clash_mode":["Rule","Proxy","Direct","RuleAllowAds","Office"],"action":"route","outbound":"direct"}]}}`, address.Port)
 	targetCoreWrite(t, path, []byte(content))
-	targetCoreWrite(t, options.ModuleConfig, []byte("WIFI_AUTO_SWITCH=0\n"))
+	targetCoreWrite(t, options.ModuleConfig, []byte("{\"wifi\":{\"enabled\":false}}"))
 	client, err := serviceapi.New(options.ServiceAddress, options.ServiceSecret)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +299,7 @@ func TestModeTargetCoreRestoresCacheAndReconcilesDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop()
-	updated, err := replaceDefaultMode([]byte(content), "Office")
+	updated, err := replaceDefaultMode([]byte(content), "Proxy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,27 +311,34 @@ func TestModeTargetCoreRestoresCacheAndReconcilesDefault(t *testing.T) {
 		t.Fatalf("没有复现内核缓存优先: %+v %v", mode, err)
 	}
 	result, err := syncConfiguredMode(t.Context(), options)
-	if err != nil || result.RuntimeMode != "Office" {
+	if err != nil || result.RuntimeMode != "Proxy" {
 		t.Fatalf("默认模式校准失败: %+v %v", result, err)
 	}
 	mode, err = client.Mode(t.Context())
 	modes, loadErr := moduleconfig.LoadModes(path)
-	if err != nil || loadErr != nil || mode.Current != "Office" || !slices.Equal(mode.Available, modes.Available) {
+	if err != nil || loadErr != nil || mode.Current != "Proxy" || !slices.Equal(mode.Available, modes.Available) {
 		t.Fatalf("模式列表或实际模式与内核不一致: native=%+v parsed=%+v errors=%v/%v", mode, modes, err, loadErr)
+	}
+	if err := service.SetMode(t.Context(), networkControlOptions(options), "RuleAllowAds"); err != nil {
+		t.Fatal(err)
+	}
+	mode, err = client.Mode(t.Context())
+	if err != nil || mode.Current != "RuleAllowAds" {
+		t.Fatalf("真实核心未应用允许广告的规则模式: %+v %v", mode, err)
 	}
 }
 
 func TestModeTargetCoreDefaultConfig(t *testing.T) {
-	core := targetCoreBinary(t)
 	staticDir, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "module", "config", "singbox"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := targetCoreRead(t, paths.SingBoxConfig(staticDir))
 	modes, err := moduleconfig.ParseModes(content)
-	if err != nil || modes.Mode != "Rule" || !slices.Equal(modes.Available, []string{"AllowAds", "Rule", "Global", "Direct"}) {
+	if err != nil || modes.Mode != "Rule" || !slices.Equal(modes.Available, []string{"Proxy", "RuleAllowAds", "Rule", "Direct"}) {
 		t.Fatalf("默认配置模式不完整: %+v %v", modes, err)
 	}
+	core := targetCoreBinary(t)
 	root, err := configObject(content)
 	if err != nil {
 		t.Fatal(err)

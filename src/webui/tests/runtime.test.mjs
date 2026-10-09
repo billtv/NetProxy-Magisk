@@ -56,19 +56,23 @@ test('节点选择运行时失败保留持久化状态与原始错误', () => {
 })
 
 test('模式补全仅使用配置列表，保留自定义名称和空格', () => {
-  const modes = ['Rule', 'Direct', 'Office Network']
+  const modes = ['Rule', 'Proxy', 'Direct', 'RuleAllowAds', 'Office Network']
   assert.deepEqual(complete('mode ', [], [], modes).candidates, modes)
   assert.deepEqual(complete('mode ').candidates, [])
   assert.equal(complete('mode Off', [], [], modes).completed, 'mode "Office Network" ')
+  assert.equal(complete('mode Pro', [], [], modes).completed, 'mode Proxy ')
+  assert.equal(complete('mode RuleA', [], [], modes).completed, 'mode RuleAllowAds ')
   const run = (...args) => decodeCtlResult(mockCtl(args))
-  assert.equal(run('mode', 'global').ok, false)
-  assert.equal(run('mode', 'Global').data.mode, 'Global')
+  for (const mode of ['proxy', 'Global', 'AllowAds']) assert.equal(run('mode', mode).ok, false)
+  for (const mode of ['Proxy', 'RuleAllowAds']) assert.equal(run('mode', mode).data.mode, mode)
+  assert.deepEqual(run('mode').data.available, ['Proxy', 'RuleAllowAds', 'Rule', 'Direct'])
   assert.deepEqual(run('mode').data.available, run('service', 'status').data.available_outbound_modes)
+  assert.match(COMMANDS.mode.help, /Proxy（代理）.*RuleAllowAds/)
   run('mode', 'Rule')
 })
 
 test('入站帮助与补全只使用公共配置目标，诊断仍保留 ebpf status', () => {
-  const targets = ['inbound', 'inbound/backend', 'inbound/app', 'inbound/ebpf', 'inbound/tun']
+  const targets = ['inbound', 'inbound/backend', 'inbound/root_policy', 'inbound/app', 'inbound/ebpf', 'inbound/tun']
   for (const action of ['read', 'apply', 'validate']) {
     assert.deepEqual(complete(`config ${action} in`).candidates, targets)
     assert.ok(!complete(`config ${action} `).candidates.includes('ebpf'))
@@ -82,6 +86,29 @@ test('入站帮助与补全只使用公共配置目标，诊断仍保留 ebpf st
   assert.match(COMMANDS.service.help, /active_backend.*ready.*PID\/API/)
 })
 
+test('模块 JSON 帮助、补全和 mock 使用完整目标与独立分区', () => {
+  const run = (...args) => decodeCtlResult(mockCtl(args))
+  const defaults = JSON.parse(readFileSync(new URL('../../module/config/module.json', import.meta.url)))
+  const targets = ['module', 'module/wifi', 'module/auto_start']
+  for (const action of ['read', 'apply', 'validate']) {
+    assert.deepEqual(complete(`config ${action} module`).candidates, targets)
+    assert.deepEqual(complete(`config ${action} module/selection`).candidates, [])
+  }
+  assert.match(COMMANDS.config.help, /module\.json/)
+  assert.match(COMMANDS.config.help, /module\/wifi、module\/auto_start/)
+  assert.match(COMMANDS.config.help, /revision 独立.*selection/)
+  const full = run('config', 'read', 'module').data
+  assert.deepEqual(JSON.parse(full.content), defaults)
+  const revisions = [full.revision]
+  for (const section of ['wifi', 'auto_start']) {
+    const fragment = run('config', 'read', `module/${section}`).data
+    assert.deepEqual(JSON.parse(fragment.content), { [section]: defaults[section] })
+    revisions.push(fragment.revision)
+  }
+  assert.equal(new Set(revisions).size, revisions.length)
+  assert.equal(run('config', 'read', 'module/selection').ok, false)
+})
+
 test('mock 同步单文件模板、分区与真实后端状态边界', () => {
   const run = (...args) => decodeCtlResult(mockCtl(args))
   const defaults = JSON.parse(readFileSync(new URL('../../module/config/inbound/inbound.json', import.meta.url)))
@@ -90,9 +117,9 @@ test('mock 同步单文件模板、分区与真实后端状态边界', () => {
   assert.equal(run('service', 'status').data.active_backend, null)
   assert.deepEqual(JSON.parse(run('config', 'read', 'inbound').data.content), defaults)
   assert.deepEqual(run('config', 'list').data.filter(item => item.category === 'inbound').map(item => item.id), [
-    'inbound', 'inbound/backend', 'inbound/app', 'inbound/ebpf', 'inbound/tun',
+    'inbound', 'inbound/backend', 'inbound/root_policy', 'inbound/app', 'inbound/ebpf', 'inbound/tun',
   ])
-  for (const section of ['backend', 'app', 'ebpf', 'tun']) {
+  for (const section of ['backend', 'root_policy', 'app', 'ebpf', 'tun']) {
     const result = run('config', 'read', `inbound/${section}`)
     assert.deepEqual(JSON.parse(result.data.content), { [section]: defaults[section] })
     assert.ok(result.data.revision)

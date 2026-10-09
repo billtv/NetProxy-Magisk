@@ -22,12 +22,19 @@ const GROUPS = [
 
 const NODE = { tag: 'demo-node', protocol: 'socks', server: 'example.test', port: 1080 }
 let serviceState = 'stopped'
-const availableModes = ['AllowAds', 'Rule', 'Global', 'Direct']
+const availableModes = ['Proxy', 'RuleAllowAds', 'Rule', 'Direct']
 let outboundMode = 'Rule'
 let runtimePrepared = false
 
+const MODULE_CONFIG = {
+  auto_start: false,
+  selection: { group_id: 'default', node_tag: '' },
+  wifi: { enabled: false, mode: 'blacklist', blacklist: [] as string[], whitelist: [] as string[], proxy_on_non_wifi: true },
+}
+
 const INBOUND_CONFIG = {
   backend: 'ebpf' as InboundBackend,
+  root_policy: 'default',
   app: { enabled: true, mode: 'blacklist', proxy_apps: [] as string[], bypass_apps: [] as string[] },
   ebpf: {
     type: 'ebpf', tag: 'netproxy-in', network: ['tcp', 'udp'], udp_timeout: '5m', tc_priority: 1,
@@ -57,9 +64,16 @@ const STATIC_CONFIG: Record<string, unknown> = {
   services: [],
 }
 
+const MODULE_DOCUMENTS = [
+  { id: 'module', filename: 'module.json', category: 'module', editable: true },
+  ...['wifi', 'auto_start'].map(section => ({
+    id: `module/${section}`, filename: section, category: 'module', editable: true, section,
+  })),
+]
+
 const CONFIG_DOCUMENTS = [
   { id: 'inbound', filename: 'inbound.json', category: 'inbound', editable: true },
-  ...['backend', 'app', 'ebpf', 'tun'].map(section => ({
+  ...['backend', 'root_policy', 'app', 'ebpf', 'tun'].map(section => ({
     id: `inbound/${section}`, filename: section, category: 'inbound', editable: true, section,
   })),
   { id: 'singbox/config.json', filename: 'config.json', category: 'config', editable: true },
@@ -194,6 +208,10 @@ function execute(args: string[]): CtlResult<unknown> {
     })
   }
 
+  if (command === 'network' && action === 'wifi-list') {
+    return response('network.wifi_list', '已读取保存的 Wi-Fi 名称', { ssids: ['Home Wi-Fi', 'Office'] })
+  }
+
   if (command === 'network' && action === 'evaluate') {
     return response('network.evaluated', 'Wi-Fi 自动切换未启用', {
       enabled: false,
@@ -240,11 +258,13 @@ function execute(args: string[]): CtlResult<unknown> {
     return response('config.list', '配置列表', documents)
   }
   if (command === 'config' && action === 'read') {
-    const document = CONFIG_DOCUMENTS.find(item => item.id === clean[2])
+    const document = [...MODULE_DOCUMENTS, ...CONFIG_DOCUMENTS].find(item => item.id === clean[2])
     if (!document) return failure('command.failed', '不支持的配置目标')
     if (document.category === 'runtime' && !runtimePrepared) return failure('command.failed', '尚未生成运行时配置')
     let content: unknown = {}
-    if (document.id === 'inbound') content = INBOUND_CONFIG
+    if (document.id === 'module') content = MODULE_CONFIG
+    else if (document.category === 'module') content = { [document.filename]: MODULE_CONFIG[document.filename as keyof typeof MODULE_CONFIG] }
+    else if (document.id === 'inbound') content = INBOUND_CONFIG
     else if (document.category === 'inbound') content = { [document.filename]: INBOUND_CONFIG[document.filename as keyof typeof INBOUND_CONFIG] }
     else if (document.id === 'runtime/inbound.json') content = { inbounds: [{ ...INBOUND_CONFIG.ebpf, shared: { enabled: false } }] }
     else if (document.id === 'runtime/providers.json') content = { providers: [] }

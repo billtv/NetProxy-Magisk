@@ -3,10 +3,11 @@ package com.fanjv.netproxy.feature.settings.presentation
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fanjv.netproxy.core.command.ConfigurationWrites
-import com.fanjv.netproxy.core.command.ShellConfigFile
 import com.fanjv.netproxy.core.ui.userMessage
 import com.fanjv.netproxy.feature.settings.data.ConfigRepository
-import com.fanjv.netproxy.feature.settings.model.ConfigSnapshot
+import com.fanjv.netproxy.feature.settings.model.ModuleAutoStartConfig
+import com.fanjv.netproxy.feature.settings.model.ModuleWifiConfig
+import com.fanjv.netproxy.feature.settings.model.WifiPolicySettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -26,8 +27,9 @@ internal class SettingsViewModel(
 ) : ViewModel(scope) {
     private val mutableState = MutableStateFlow(SettingsUiState())
     val state = mutableState.asStateFlow()
-    private var snapshot: ConfigSnapshot? = null
-    private var confirmedWifi = WifiPolicySettings()
+    private var wifiSnapshot: ModuleWifiConfig? = null
+    private var autoStartSnapshot: ModuleAutoStartConfig? = null
+    private val confirmedWifi get() = wifiSnapshot?.wifi ?: WifiPolicySettings()
     private var saveJob: Job? = null
     private var requestedWifi: WifiPolicySettings? = null
     private var refreshJob: Job? = null
@@ -53,18 +55,19 @@ internal class SettingsViewModel(
         }
     }
 
-    fun setWifiAutoSwitch(value: Boolean) = edit { it.copy(enabled = value) }
-    fun setWifiSsidMode(value: String) = edit { it.copy(mode = value) }
-    fun setWifiSsidList(value: String) = edit { it.copy(ssids = value.replace('，', ',').split(',')
-        .map(String::trim).filter(String::isNotEmpty).distinct().joinToString(",")) }
-    fun setProxyOnCellular(value: Boolean) = edit { it.copy(proxyOnCellular = value) }
+    fun setWifiSsidMode(value: String) = edit {
+        if (value == "off") it.copy(enabled = false) else it.copy(enabled = true, mode = value)
+    }
+    fun setWifiSsids(values: List<String>) = edit { it.withSsids(values.distinct()) }
+    fun setProxyOnNonWifi(value: Boolean) = edit { it.copy(proxyOnNonWifi = value) }
+    suspend fun savedWifiNetworks(): List<String> = repository.savedWifiNetworks()
 
     private fun edit(transform: (WifiPolicySettings) -> WifiPolicySettings) {
         if (!state.value.hasLoaded || state.value.requiresReload) return
         refreshJob?.cancel()
         mutableState.update {
             val wifi = transform(it.wifi)
-            it.copy(wifi = wifi, isLoading = false, hasPendingWifi = wifi != confirmedWifi || it.isSaving, error = "")
+            it.copy(wifi = wifi, isLoading = false, hasPendingWifi = wifi != confirmedWifi || it.isSavingWifi, error = "")
         }
     }
 
@@ -72,28 +75,18 @@ internal class SettingsViewModel(
         if (!state.value.hasPendingWifi || state.value.requiresReload) return
         requestedWifi = state.value.wifi
         if (saveJob?.isActive == true) return
-        mutableState.update { it.copy(isSaving = true) }
-        saveJob = writes.launch("module", write = {
+        mutableState.update { it.copy(isSavingWifi = true) }
+        saveJob = writes.launch("module/wifi", write = {
             try {
                 while (requestedWifi != null) {
                     val saved = requestedWifi!!
                     requestedWifi = null
                     if (saved == confirmedWifi) continue
-                    val previous = checkNotNull(snapshot)
-                    val values = listOf(
-                        Triple("WIFI_AUTO_SWITCH", if (saved.enabled) "1" else "0", false),
-                        Triple("WIFI_SSID_MODE", saved.mode, true),
-                        Triple("WIFI_SSID_LIST", saved.ssids, true),
-                        Triple("PROXY_ON_CELLULAR", if (saved.proxyOnCellular) "1" else "0", false),
-                    )
-                    val content = values.fold(previous.content) { content, (key, value, quoted) ->
-                        ShellConfigFile.updateValue(content, key, value, quoted)
-                    }
-                    snapshot = ConfigSnapshot(content, repository.apply("module", content, previous.revision))
-                    confirmedWifi = saved
+                    val revision = repository.applyWifi(saved, checkNotNull(wifiSnapshot).revision)
+                    wifiSnapshot = ModuleWifiConfig(saved, revision)
                 }
             } finally {
-                mutableState.update { it.copy(isSaving = false, hasPendingWifi = it.wifi != confirmedWifi) }
+                mutableState.update { it.copy(isSavingWifi = false, hasPendingWifi = it.wifi != confirmedWifi) }
             }
         }, onFailure = { error ->
             requestedWifi = null
@@ -108,35 +101,35 @@ internal class SettingsViewModel(
     }
 
     fun setAutoStartEnabled(value: Boolean) {
-        if (!state.value.hasLoaded || state.value.isSaving || state.value.isLoading || state.value.hasPendingWifi) return
-        mutableState.value = state.value.copy(isSaving = true, error = "")
-        viewModelScope.launch {
+        if (!state.value.hasLoaded || state.value.isSavingAutoStart || state.value.isLoading) return
+        val previous = autoStartSnapshot ?: return
+        if (value == previous.enabled) return
+        mutableState.update { it.copy(isSavingAutoStart = true, error = "") }
+        writes.launch("module/auto_start", write = {
             try {
-                repository.updateValue("module", "AUTO_START", if (value) "1" else "0")
-                mutableState.value = readSettings()
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                mutableState.value = state.value.copy(isSaving = false, error = error.userMessage())
+                val revision = repository.applyAutoStart(value, previous.revision)
+                autoStartSnapshot = ModuleAutoStartConfig(value, revision)
+                mutableState.update { it.copy(autoStartEnabled = value) }
+            } finally {
+                mutableState.update { it.copy(isSavingAutoStart = false) }
             }
-        }
+        }, onFailure = { error ->
+            autoStartSnapshot = null
+            mutableState.update { it.copy(error = error.userMessage()) }
+        })
     }
 
     private suspend fun readSettings(): SettingsUiState {
-        val read = repository.readSnapshot("module")
+        val wifi = repository.readWifi()
+        val autoStart = repository.readAutoStart()
         currentCoroutineContext().ensureActive()
-        val module = ShellConfigFile.parse(read.content)
+        wifiSnapshot = wifi
+        autoStartSnapshot = autoStart
         val settings = SettingsUiState(
             hasLoaded = true,
-            autoStartEnabled = ShellConfigFile.boolean(module["AUTO_START"]),
-            wifi = WifiPolicySettings(
-                enabled = ShellConfigFile.boolean(module["WIFI_AUTO_SWITCH"]),
-                mode = module["WIFI_SSID_MODE"] ?: "blacklist",
-                ssids = module["WIFI_SSID_LIST"].orEmpty(),
-                proxyOnCellular = ShellConfigFile.boolean(module["PROXY_ON_CELLULAR"], true)
-            )
+            autoStartEnabled = autoStart.enabled,
+            wifi = wifi.wifi
         )
-        snapshot = read
-        confirmedWifi = settings.wifi
         return settings
     }
 }

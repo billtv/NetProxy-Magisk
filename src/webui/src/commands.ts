@@ -78,15 +78,18 @@ configured_backend 是保存的入站；active_backend 仅在 ready 且 PID/API 
   mode <模式名称> 保存主配置默认模式，运行时应用网络策略
 
 可选模式来自主配置的路由与 DNS 规则，名称与内核一致。
+默认配置：Rule（规则）、Proxy（代理）、Direct（直连）、RuleAllowAds（规则，允许广告）。
+示例：mode Proxy、mode RuleAllowAds。
 `,
   },
   network: {
     overview: 'network <命令>  网络策略评估',
-    actions: ['evaluate'],
+    actions: ['evaluate', 'wifi-list'],
     help: `network - 网络策略
 
   network evaluate --type <类型> [--ssid <名称>]
                          评估当前网络并应用 Wi-Fi 策略
+  network wifi-list       查看已保存的 Wi-Fi 名称
   类型: wifi / not_wifi
 `,
   },
@@ -132,8 +135,11 @@ configured_backend 是保存的入站；active_backend 仅在 ready 且 PID/API 
   config validate <目标> <内容文件>   校验配置
   config apply <目标> <内容文件>      应用配置
 
-  完整配置：singbox/config.json、inbound
-  入站分区：inbound/backend、inbound/app、inbound/ebpf、inbound/tun
+  完整配置：module（module.json）、singbox/config.json、inbound
+  模块分区：module/wifi、module/auto_start
+  模块分区保留顶层字段，例如 {"auto_start":true}、{"wifi":{...}}；不能用 {} 删除。
+  模块分区 revision 独立，保存时保留 selection 和其他字段；auto_start 只影响下次开机。
+  入站分区：inbound/backend、inbound/root_policy、inbound/app、inbound/ebpf、inbound/tun
   入站分区保留顶层字段，例如 {"backend":"tun"}；不能用 {} 删除。
   核心分区：singbox/dns、singbox/inbounds、singbox/route 等
   核心分区保留顶层字段，例如 {"dns":{...}}；{} 删除该分区。
@@ -160,7 +166,8 @@ export const COMMAND_NAMES = Object.keys(COMMANDS) as CommandName[]
 export const ROOT_COMPLETIONS = [...COMMAND_NAMES, 'help', 'clear', 'exit']
 export const HELP_TOPICS = [...COMMAND_NAMES, 'shell']
 const CONFIG_TARGETS = [
-  'inbound', 'inbound/backend', 'inbound/app', 'inbound/ebpf', 'inbound/tun', 'singbox/config.json',
+  'module', 'module/wifi', 'module/auto_start',
+  'inbound', 'inbound/backend', 'inbound/root_policy', 'inbound/app', 'inbound/ebpf', 'inbound/tun', 'singbox/config.json',
   'singbox/log', 'singbox/dns', 'singbox/inbounds', 'singbox/outbounds', 'singbox/route',
   'singbox/experimental', 'singbox/http_clients', 'singbox/services',
 ]
