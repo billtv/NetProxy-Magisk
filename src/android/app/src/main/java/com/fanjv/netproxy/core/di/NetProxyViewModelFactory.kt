@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fanjv.netproxy.NetProxyApplication
+import com.fanjv.netproxy.core.module.ModuleAccessViewModel
 import com.fanjv.netproxy.feature.apps.presentation.AppsViewModel
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.CatalogNodesViewModel
 import com.fanjv.netproxy.feature.catalog.presentation.subscriptions.SubscriptionDetailsViewModel
@@ -27,9 +28,10 @@ internal class NetProxyViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T =
         when (modelClass) {
+            ModuleAccessViewModel::class.java -> ModuleAccessViewModel(container.moduleEnvironment)
             CatalogDashboardViewModel::class.java -> CatalogDashboardViewModel(
                 container.serviceRepository,
-                container.moduleEnvironment
+                container.moduleEnvironment.totalMemoryBytes
             )
 
             CatalogNodesViewModel::class.java -> CatalogNodesViewModel(
@@ -51,14 +53,17 @@ internal class NetProxyViewModelFactory(
 
             AppsViewModel::class.java -> AppsViewModel(
                 container.appPolicyRepository,
-                container.appPackageRepository
+                container.appPackageRepository,
+                writes = container.configurationWrites
             )
 
             SettingsViewModel::class.java -> SettingsViewModel(
-                container.configRepository
+                container.configRepository,
+                writes = container.configurationWrites
             )
 
-            InboundViewModel::class.java -> InboundViewModel(container.inboundRepository)
+            InboundViewModel::class.java -> InboundViewModel(container.inboundRepository,
+                writes = container.configurationWrites)
 
             RoutingRulesViewModel::class.java -> RoutingRulesViewModel(container.configRepository)
 

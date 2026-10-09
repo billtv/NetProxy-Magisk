@@ -1,10 +1,10 @@
 package com.fanjv.netproxy.feature.settings.presentation
 
 import androidx.compose.foundation.layout.*
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -31,12 +31,15 @@ internal fun NetworkMatchingScreen(
     viewModel: SettingsViewModel = netProxyViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val enabled = state.hasLoaded && !state.isLoading && !state.isSaving
+    val enabled = state.hasLoaded && !state.requiresReload
+    val commitOnLeave = rememberCommitOnLeave(viewModel::requestWifiFlush)
+    val leave: () -> Unit = { commitOnLeave(onBack) }
     val wifi = state.wifi
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop()
     var editing by rememberSaveable { mutableStateOf(false) }
     var ssids by rememberSaveable { mutableStateOf("") }
+    BackHandler(enabled = !editing && (state.hasPendingWifi || state.isSaving || state.requiresReload)) { leave() }
 
     LifecycleResumeEffect(Unit) {
         viewModel.refresh()
@@ -50,17 +53,14 @@ internal fun NetworkMatchingScreen(
                     title = stringResource(R.string.network_matching),
                     color = if (backdrop != null) Color.Transparent else colorScheme.surface,
                     scrollBehavior = scrollBehavior,
-                    navigationIcon = { BackIconButton(onClick = onBack) }
+                    navigationIcon = { BackIconButton(onClick = leave) }
                 )
             }
         },
-        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { padding ->
         Box(Modifier.then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)) {
-            if (!state.hasLoaded && state.error.isBlank()) {
-                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                    InfiniteProgressIndicator()
-                }
+            if (!state.hasLoaded) {
+                ContentStatus(padding, stringResource(R.string.network_read_failed), loading = state.error.isBlank())
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxHeight().scrollEndHaptic().overScrollVertical()
@@ -70,6 +70,9 @@ internal fun NetworkMatchingScreen(
                 ) {
                     if (state.error.isNotBlank()) item("error") {
                         Text(state.error, Modifier.padding(14.dp), color = colorScheme.error)
+                    }
+                    if (state.requiresReload) item("reload") {
+                        TextButton(stringResource(R.string.routing_reload_draft), onClick = viewModel::discardWifiAndReload)
                     }
                     if (state.hasLoaded) groupedCardSection("wifi", { stringResource(R.string.wifi_auto_switch_title) }, listOf(
                         CardItem("enabled") {
@@ -99,7 +102,7 @@ internal fun NetworkMatchingScreen(
                                 enabled = enabled, onCheckedChange = viewModel::setProxyOnCellular)
                         }
                     ))
-                    if (state.error.isNotBlank()) item("retry") {
+                    if (state.error.isNotBlank() && !state.requiresReload) item("retry") {
                         TextButton(stringResource(R.string.inbound_reload), enabled = !state.isLoading && !state.isSaving,
                             onClick = viewModel::refresh)
                     }
