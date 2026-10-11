@@ -103,11 +103,14 @@ src/module/service.sh
 - 构造依赖由 `AppContainer` 和 `NetProxyViewModelFactory` 提供，不引入 Hilt/Koin，除非先完成明确的全项目架构决策。
 - 遵循现有 miuix 视觉和交互：二级页使用 `AdaptiveTopAppBar`，分组标题使用 miuix `SmallTitle`，列表保持 Lazy item 粒度，卡片优先复用 `groupedCardItems`。有 miuix 对应组件时不另造 Material 风格替代品。
 - 分应用搜索由 Scaffold 的 `popupHost` 承载，仅搜索框参与上移动画；普通列表不做位移动画，两份列表的滚动状态在内容切换之外持有，输入焦点不得跳过展开动画直接确认搜索状态。自定义 `popupHost` 仍须保留 `MiuixPopupHost`，否则页面下拉菜单无法显示。
+- 应用代理模式与搜索框位于同一固定顶部区域，不作为应用列表条目滚动；应用图标失效只触发后台重新加载，不清空已展示图标，缓存命中须直接用于首帧。
 - Miuix Nav 是页面导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
 - 主分页底部导航由 `MainBottomBar` 单一实现统一承载；主题偏好不改变其结构或布局形态。
 - Root 与模块可用性由应用入口统一检查；未确认可用时不启动模块页面读取，仅保留仪表盘与设置导航。动态分页按目的地身份恢复，不沿用旧页码。受限页面保留标题和返回键，读取失败与真实空内容必须区分，并在 Scaffold 实际内容区居中展示；权限变化不得取消已开始的写事务或丢弃编辑草稿。
 - 管理器由 Android 原生资源自动匹配中文、英语和俄语，英文是默认资源；界面文案放入字符串资源，不自行保存或强制覆盖系统语言。补全与校验逻辑不得依据翻译后的文本判断类型或错误分类。
 - 路由规则表单只编辑现有 proxy/direct/block 本地规则集；多条件、logical、invert 和其他原生字段的规则保留原样并交给 JSON 编辑器，不能展开成多个单条件规则改变匹配语义。保存使用读取时的 revision，不为表单维护另一份规则数据库。
+- 默认 DNS 引用本地规则集时使用原生 `evaluate` / `match_response`，不能直接按旧式地址过滤引用；否则添加有效 IP 规则会触发内核弃用检查并使正在重载的核心退出。不得使用 `ENABLE_DEPRECATED_*` 绕过。
+- 路由规则合并列表必须以规则集和文件内索引共同定位条目；添加时选择目标规则集，编辑与删除已有规则不得因其他规则集存在相同索引而写错文件。合并展示不改变主配置中的规则匹配顺序。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
 - 模块包必须包含 `NetProxy.apk`，由独立 Android 任务通过共享 Action 从当前源码构建，并使用 GitHub Secrets 中的固定密钥签名；不得提交签名材料或手工维护该生成物。安装器不检查已安装版本，两处安装选择共用音量加循环、音量减确认；10 秒无操作默认执行 `pm install -r`，操作后 20 秒未确认取消安装；APK 安装失败不卸载应用或清除数据，也不阻塞模块安装。
 
@@ -423,9 +426,11 @@ Go 生命周期控制器通过 `-c config/singbox/config.json` 加载静态配�
 - CI 与 Release 共用 `build-module.yml` 的并行任务图；模块任务完成 Go/Shell 验证、`netproxyctl`、WebUI 与内容压缩，Android 任务构建并用固定密钥签名当前源码的 APK。共享工作流等待两者成功后汇合为唯一模块包，发布任务只下载最终产物，不重新编译或打包。Android 源码变化必须触发模块重打包；任一构建或所需验证失败均不得发布。
 - `verify.yml` 面向 Pull Request 与手动源码验证，只读取公开源码并按变更范围执行 Native、WebUI、Android 或文档检查；它不得读取签名、发布、Telegram 或统计 Secrets，不得打包、上传或发布产物。只有 `main` 上的 `ci.yml` 和 tag 发布工作流可以构建签名管理器与模块包。
 - CI 变更范围从同分支上次成功验证的提交计算，不能只比较本次 push：前一轮被取消或失败的改动仍须验证；基线不可用时执行全部检查。
-- 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。KernelSU 源码镜像仍须获取完整对象，不能套用部分克隆。
-- Release 发布 `NetProxy_<版本>_<构建号>.zip` 与独立管理器 APK；ZIP 必须在管理器构建完成后追加同一份已签名 APK，并在发布前用真实归档检查安装入口。APK 只在首次解压检查时必需，用户安装或跳过后均清理，热切换校验不得要求它仍然存在。
-- 模块使用 ZIP 容器和 XZ 9 压缩；汇合任务直接向模块内容归档以 Store 追加 APK，不复制第二份发行包。CI 上传归档时不再进行外层压缩。
+- 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。
+- 主仓库只发布 `NetProxy_<版本>_<构建号>.zip`，必须包含本次构建的管理器 APK。APK 只在首次解压检查时必需，用户安装或跳过后均清理，热切换校验不得要求它仍然存在。
+- 模块使用 ZIP 容器和 XZ 9 压缩，根目录唯一的 `module.prop` 必须使用 Store，供 KernelSU 索引读取；汇合任务以 Store 追加 APK，不复制第二份发行包。CI 上传归档时不再进行外层压缩。
+- KernelSU 仅从公开 `Fanju6/NetProxy-Releases` 分发不可变正式版本，源码和可变 nightly 留在主仓库；不镜像源码、全部标签或历史 Release。根目录 `module.yaml` 与 `.github/kernelsu/` 是展示元数据，不是设备上的 `config/module.json`。正式发布先经过官方 Action 预检，主仓库发布后分发同一 ZIP；分发资源按官方规则命名 `netproxy-<构建号>-<版本>.zip`，摘要必须一致。
+- `publish-kernelsu.yml` 重试只下载既有主仓库正式 Release，不重新构建。已发布的分发版本只能验证不可变状态和摘要，不能覆盖、删除或移动 tag；分发失败不能冒充主仓库发布失败。`DIST_REPO_TOKEN` 仅有分发仓库 Contents 读写和 Administration 只读权限，资源更新使用仅限主仓库的 `RESOURCE_UPDATE_TOKEN`，两者不能互用。
 - Android 受影响时，CI 在管理器构建任务中使用同一次 Gradle 调用执行单元测试、Lint 与 Release 构建；仅需模块打包时仍构建当前管理器，不额外执行 Android 验证。资源维护复用纯验证模式，不构建 APK，也不需要签名密钥。固定签名由 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 四个 GitHub Secrets 注入；缺失时构建失败，不生成替代密钥。CI 版本名保留提交短哈希，仅用于区分构建。
 - Release 只能从与 `src/module/module.prop` 的 `version=` 和 `docs/changelog.md` 对应章节完全一致的 `v<版本号>` tag 启动；预检失败时不得开始签名构建或创建 Release。
 - `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；规则与 Web 资源属于内容更新，sing-box 属于核心更新，工具链大版本进入报告。GitHub Actions 更新只报告、不由定时任务静默改写。
