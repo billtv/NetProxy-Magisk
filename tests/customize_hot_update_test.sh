@@ -471,6 +471,16 @@ test_hot_update_guards() (
   rm "$STAGE/bin/sing-box"
   if apply_hot_update; then exit 1; fi
   [ -d "$STAGE" ] && [ -f "$LIVE/update" ]
+
+  reset_modules
+  TEST_API_INIT=1
+  export TEST_API_INIT
+  if commit_hot_update; then exit 1; fi
+  assert_value "$CALL_LOG" 'api init'
+  [ "$(wc -l < "$CALL_LOG")" -eq 1 ]
+  assert_value "$LIVE/module.prop" version=current
+  assert_module "$LIVE/config/module.json" current
+  [ -d "$STAGE" ] && [ -f "$LIVE/update" ]
 )
 
 test_hot_update_latest_data() (
