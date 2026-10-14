@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -39,7 +40,8 @@ func TestResourcesSubscriptionSummariesPrivateSettingsAndProgress(t *testing.T) 
 	if err := json.Unmarshal(result.Data, &summaries); err != nil {
 		t.Fatal(err)
 	}
-	if len(summaries) != 1 || summaries[0].ID != "subscription-test" || summaries[0].Name != "匿名订阅" {
+	index := slices.IndexFunc(summaries, func(group catalog.GroupSummary) bool { return group.ID == "subscription-test" })
+	if len(summaries) != 2 || index < 0 || summaries[index].Name != "匿名订阅" {
 		t.Fatalf("摘要不一致: %+v", summaries)
 	}
 	for _, path := range []string{"/api/v1/subscriptions", "/api/v1/subscriptions/subscription-test"} {
@@ -146,7 +148,7 @@ func TestResourcesSubscriptionFailedDownloadReportsPersistedSettings(t *testing.
 	}
 	var summaries []catalog.GroupSummary
 	resourceAssertSuccess(t, server, "GET", "/api/v1/subscriptions", "", "subscription.list", &summaries)
-	if len(summaries) != 1 {
+	if len(summaries) != 2 || !slices.ContainsFunc(summaries, func(group catalog.GroupSummary) bool { return group.Type == "subscription" }) {
 		t.Fatalf("已接受设置未保存: %+v", summaries)
 	}
 }

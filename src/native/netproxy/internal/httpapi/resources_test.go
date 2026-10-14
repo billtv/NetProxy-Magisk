@@ -161,6 +161,16 @@ func TestResourcesReadWhileCoreStopped(t *testing.T) {
 	if len(groups) != 1 || len(groups[0].Nodes) != 1 || groups[0].Nodes[0].Tag != "节点 / 02" {
 		t.Fatalf("停止时持久节点不可读: %+v", groups)
 	}
+	var summaries []catalog.GroupSummary
+	resourceAssertSuccess(t, server, "GET", "/api/v1/subscriptions", "", "subscription.list", &summaries)
+	if len(summaries) != 1 || summaries[0].ID != "default" || summaries[0].Type != "local" || !summaries[0].Active {
+		t.Fatalf("订阅页遗漏活动本地分组: %+v", summaries)
+	}
+	var local catalog.GroupSnapshot
+	resourceAssertSuccess(t, server, "GET", "/api/v1/subscriptions/default", "", "subscription.show", &local)
+	if local.Group.ID != "default" || !local.Group.Active || len(local.Nodes) != 1 {
+		t.Fatalf("本地分组详情不可读: %+v", local)
+	}
 	for _, path := range []string{server.options.StateFile, server.options.WorkerPIDFile, server.options.RuntimeDir} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("读取启动了服务或 Worker: %s %v", path, err)

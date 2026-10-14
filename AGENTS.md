@@ -102,6 +102,8 @@ src/module/service.sh
 
 - 数据流保持 `Compose -> ViewModel -> Repository -> ModuleApiClient -> 模块 HTTPS API`。管理器不申请 Root，不执行 CLI，不直接读取 `/data/adb`、Catalog 文件或 PID。应用标签、图标与多用户由 Go 按需运行模块内 Java DEX 查询系统框架。
 - 普通 HTTP 读取、下载与图标查询随客户端取消；已接受写入有界收尾，不盲目重发。共享 SSE 按消费者合并主题，最后消费者退出后关闭；断线明确报错，重连重新等待完整快照，不使用轮询回退。首次自动连接只触发固定官方用户 0 的私有 Provider 交付，不通过 HTTP 返回秘密；Provider 校验 Binder UID 0，辅助程序校验当前 APK 签名、UID 与非导出 Provider，不接受请求指定目标。
+- 订阅页列表与 SSE 的 `subscriptions` 快照包含本地和 URL 订阅分组，普通详情同样可读本地分组；URL 私有设置与订阅修改仍限制为 URL 订阅。框架 DEX 绘制应用原生图标直接读取 Android 资源；`loadIcon()` 的厂商主题扩展会在独立 `app_process` 读取系统 Provider 时被拒绝，造成整批图标消失。
+- 管理器 SSE 使用不回连接池的独占连接，短请求成功只关闭响应流；请求失败或取消只断开自身一次。对已归还连接池的连接再次 disconnect，会中断随后复用它的请求，导致页面读取返回“操作已取消”。
 - ViewModel 按功能域持有不可变 `StateFlow`；Repository 负责命令组合和响应映射。不要重新堆回全能 Repository、全能 ViewModel 或静态 Service Locator。
 - 构造依赖由 `AppContainer` 和 `NetProxyViewModelFactory` 提供，不引入 Hilt/Koin，除非先完成明确的全项目架构决策。
 - 遵循现有 miuix 视觉和交互：二级页使用 `AdaptiveTopAppBar`，分组标题使用 miuix `SmallTitle`，列表保持 Lazy item 粒度，卡片优先复用 `groupedCardItems`。有 miuix 对应组件时不另造 Material 风格替代品。

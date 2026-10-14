@@ -85,7 +85,7 @@ func (s *Server) readService(ctx context.Context, r *http.Request) (contract.Res
 	return contract.Success("service.status", "服务状态", data.Status), err
 }
 
-func (s *Server) catalogSummaries(ctx context.Context, kind string) ([]catalog.GroupSummary, error) {
+func (s *Server) catalogSummaries(ctx context.Context) ([]catalog.GroupSummary, error) {
 	active := ""
 	config, err := moduleconfig.LoadModule(s.options.ModuleConfig)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -95,7 +95,7 @@ func (s *Server) catalogSummaries(ctx context.Context, kind string) ([]catalog.G
 		active = config.ActiveGroupID
 	}
 	groups, err := catalog.Scan(ctx, catalog.ScanOptions{
-		Root: s.options.CatalogRoot, Type: kind, ActiveGroup: active, ProgressDir: s.options.ProgressDir,
+		Root: s.options.CatalogRoot, Type: "all", ActiveGroup: active, ProgressDir: s.options.ProgressDir,
 	})
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (s *Server) readCatalog(ctx context.Context, r *http.Request) (contract.Res
 	if _, err := resourceQuery(r); err != nil {
 		return contract.Result{}, err
 	}
-	data, err := s.catalogSummaries(ctx, "all")
+	data, err := s.catalogSummaries(ctx)
 	return contract.Success("catalog.groups", "Catalog 分组快照", data), err
 }
 
@@ -299,7 +299,7 @@ func (s *Server) listSubscriptions(ctx context.Context, r *http.Request) (contra
 	if _, err := resourceQuery(r); err != nil {
 		return contract.Result{}, err
 	}
-	data, err := s.catalogSummaries(ctx, "subscription")
+	data, err := s.catalogSummaries(ctx)
 	return contract.Success("subscription.list", "订阅列表", data), err
 }
 
@@ -408,14 +408,19 @@ func (s *Server) showSubscription(ctx context.Context, r *http.Request) (contrac
 		}
 		private = query.Get("private") == "true"
 	}
-	metadata, err := s.subscriptionMetadata(ctx, r)
+	if private {
+		metadata, err := s.subscriptionMetadata(ctx, r)
+		return contract.Success("subscription.show", "订阅详情", metadata), err
+	}
+	id := r.PathValue("id")
+	if err := resourceGroupID(id, false); err != nil {
+		return contract.Result{}, err
+	}
+	settings, err := moduleconfig.LoadModule(s.options.ModuleConfig)
 	if err != nil {
 		return contract.Result{}, err
 	}
-	if private {
-		return contract.Success("subscription.show", "订阅详情", metadata), nil
-	}
-	groups, err := catalog.Scan(ctx, catalog.ScanOptions{Root: s.options.CatalogRoot, GroupID: metadata.ID, ProgressDir: s.options.ProgressDir, WithNodes: true})
+	groups, err := catalog.Scan(ctx, catalog.ScanOptions{Root: s.options.CatalogRoot, GroupID: id, ActiveGroup: settings.ActiveGroupID, ProgressDir: s.options.ProgressDir, WithNodes: true})
 	if err != nil {
 		return contract.Result{}, err
 	}

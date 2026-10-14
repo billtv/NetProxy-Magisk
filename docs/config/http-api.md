@@ -108,8 +108,8 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `POST /nodes/delay` | 测速，正文含 `group_id/node_tag`；空 tag 测整个分组 |
 | `GET/PUT /selection` | 查询或保存节点选择 |
 | `GET/PUT /mode` | 查询或保存内核原生模式；正文为 `{"mode":"Rule"}` 等 |
-| `GET/POST /subscriptions` | 订阅列表或添加订阅 |
-| `GET/PUT/DELETE /subscriptions/{id}` | 查询、编辑或删除订阅；`?private=true` 读取私有设置 |
+| `GET/POST /subscriptions` | 本地与订阅分组列表，或添加 URL 订阅 |
+| `GET/PUT/DELETE /subscriptions/{id}` | 查询分组详情，或编辑、删除 URL 订阅；`?private=true` 仅读取 URL 订阅私有设置 |
 | `POST /subscriptions/{id}/update` | 更新一个订阅 |
 | `POST /subscriptions/update-all` | 更新全部订阅 |
 | `GET /subscriptions/{id}/history`、`progress` | 历史与当前进度 |
@@ -129,6 +129,8 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `GET /events?topics=status,groups,subscriptions` | 实时事件流 |
 
 订阅添加与编辑支持 `name/url/user_agent/hwid/custom_headers/auto_update/update_interval/update_via_proxy/include/exclude/allow_insecure/download_timeout`。`update_interval` 与 `download_timeout` 使用秒；下载方式为 `auto/always/never`，分别对应自动、代理、直连。编辑时省略字段保留原值，清空请求头使用空对象，而不是 null。
+
+`subscriptions` 事件与列表接口返回同一组摘要，包含“本地配置”和活动分组状态；更新订阅操作只处理 URL 订阅。
 
 接口不接受手机的输入或输出文件路径。节点导入传文件内容；诊断导出直接下载，不能指定设备写入位置。
 

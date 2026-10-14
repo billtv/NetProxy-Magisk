@@ -21,6 +21,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLHandshakeException
@@ -64,7 +65,7 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
             connection.requestMethod = method
             connection.readTimeout = if (!mutation) 30_000 else if (path.startsWith("/subscriptions")) 615_000 else 135_000
             try {
-                execute(connection) {
+                withHttpConnection(connection) {
                     if (body != null) {
                         connection.doOutput = true
                         connection.setRequestProperty("Content-Type", "application/json")
@@ -98,7 +99,7 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
         val connection = open(connect(), path, query)
         connection.readTimeout = 150_000
         try {
-            execute(connection) {
+            withHttpConnection(connection) {
                 val status = connection.responseCode
                 if (status !in 200..299) {
                     ModuleApiCodec(json).decode(status, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
@@ -116,8 +117,9 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
 
     override suspend fun watch(topics: Set<String>, consume: suspend (ModuleEvent) -> Unit): Unit = withContext(Dispatchers.IO) {
         val connection = open(connect(), "/events", mapOf("topics" to topics.sorted().joinToString(",")))
+        connection.setRequestProperty("Connection", "close")
         connection.readTimeout = 30_000
-        execute(connection) {
+        withHttpConnection(connection) {
             if (connection.responseCode != 200) {
                 ModuleApiCodec(json).decode(connection.responseCode, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
                 throw ModuleApiException("api.events_failed", "无法订阅模块事件")
@@ -169,9 +171,11 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
         connection.doOutput = true
         connection.setRequestProperty("Content-Type", "application/json")
         connection.setFixedLengthStreamingMode(2)
-        execute(connection) {
+        withHttpConnection(connection) {
             connection.outputStream.use { it.write("{}".toByteArray()) }
-            connection.responseCode
+            val status = connection.responseCode
+            (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.use { it.readBytesLimited(64 * 1024) }
         }
     }
 
@@ -184,13 +188,6 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
     private fun pinnedTLS(fingerprint: String): SSLSocketFactory {
         pinnedFactory?.takeIf { it.first == fingerprint }?.let { return it.second }
         return tls(fingerprint).socketFactory.also { pinnedFactory = fingerprint to it }
-    }
-
-    private suspend fun <T> execute(connection: HttpsURLConnection, operation: suspend () -> T): T = coroutineScope {
-        val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
-            try { awaitCancellation() } finally { connection.disconnect() }
-        }
-        try { operation() } finally { cancellation.cancel(); connection.disconnect() }
     }
 
     private fun tls(fingerprint: String?): SSLContext = SSLContext.getInstance("TLS").apply {
@@ -209,6 +206,25 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+}
+
+internal suspend fun <T> withHttpConnection(connection: HttpsURLConnection, operation: suspend () -> T): T = coroutineScope {
+    val finished = AtomicBoolean(false)
+    val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+        try { awaitCancellation() } finally {
+            if (finished.compareAndSet(false, true)) connection.disconnect()
+        }
+    }
+    try {
+        operation()
+    } catch (error: Throwable) {
+        if (finished.compareAndSet(false, true)) connection.disconnect()
+        throw error
+    } finally {
+        // 正常读取关闭流后连接已归还连接池，再 disconnect 可能中断复用它的另一个请求。
+        finished.set(true)
+        cancellation.cancel()
+    }
 }
 
 private fun java.io.InputStream.readBytesLimited(limit: Int): ByteArray {

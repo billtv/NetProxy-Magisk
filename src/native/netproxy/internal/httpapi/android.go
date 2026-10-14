@@ -17,7 +17,7 @@ type platformQuerier interface {
 	Query(context.Context, androidplatform.Request) (jsontext.Value, error)
 }
 
-var androidPackageName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$`)
+var androidPackageName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*$`)
 
 func platformPresent() bool {
 	_, err := os.Stat("/system/bin/app_process")

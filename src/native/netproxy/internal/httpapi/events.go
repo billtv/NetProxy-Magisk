@@ -338,7 +338,7 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 			}
 		}
 		if topics&topicSubscriptions != 0 {
-			groups, err := h.server.catalogSummaries(ctx, "subscription")
+			groups, err := h.server.catalogSummaries(ctx)
 			if err != nil {
 				response, _ := contract.Failure(ctx, err)
 				h.emit(topicSubscriptions, "subscriptions", response)

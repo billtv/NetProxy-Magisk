@@ -9,6 +9,44 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.fanjv.netproxy.feature.catalog.data.SubscriptionRepository
 
 class ModuleApiClientTest {
+    @Test fun completedConnectionRemainsReusable() = runBlocking {
+        val connection = RecordingConnection()
+        assertEquals(42, withHttpConnection(connection) { 42 })
+        yield()
+        assertEquals(0, connection.disconnects)
+    }
+
+    @Test fun failedConnectionIsDisconnectedOnce() = runBlocking {
+        val connection = RecordingConnection()
+        val error = java.io.IOException("fixture")
+        try {
+            withHttpConnection(connection) { throw error }
+            fail("读取失败未传播")
+        } catch (actual: java.io.IOException) {
+            assertEquals(error.message, actual.message)
+        }
+        assertEquals(1, connection.disconnects)
+    }
+
+    @Test fun cancelledConnectionIsDisconnectedOnce() = runBlocking {
+        val connection = RecordingConnection()
+        val job = launch(start = CoroutineStart.UNDISPATCHED) {
+            withHttpConnection(connection) { awaitCancellation() }
+        }
+        job.cancelAndJoin()
+        assertEquals(1, connection.disconnects)
+    }
+
+    private class RecordingConnection : javax.net.ssl.HttpsURLConnection(java.net.URL("https://127.0.0.1:9091")) {
+        var disconnects = 0
+        override fun disconnect() { disconnects++ }
+        override fun connect() = Unit
+        override fun usingProxy() = false
+        override fun getCipherSuite() = "fixture"
+        override fun getLocalCertificates(): Array<java.security.cert.Certificate>? = null
+        override fun getServerCertificates(): Array<java.security.cert.Certificate> = emptyArray()
+    }
+
     @Test fun explicitReconnectConfirmsThePinnedServiceBeforeSuccess() = runBlocking {
         val steps = mutableListOf<String>()
         val client = ModuleApiClient(object : TestApiTransport() {

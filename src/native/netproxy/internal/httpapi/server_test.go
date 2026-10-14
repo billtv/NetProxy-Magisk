@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 )
 
@@ -296,7 +297,7 @@ func TestEventsSendSnapshotAndCloseWithServer(t *testing.T) {
 	server, cancel, done := serveFixture(t)
 	ctx, stop := context.WithTimeout(t.Context(), 3*time.Second)
 	defer stop()
-	request, err := http.NewRequestWithContext(ctx, "GET", server.config.Connection().Address+"/api/v1/events?topics=status", nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", server.config.Connection().Address+"/api/v1/events?topics=status,subscriptions", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,12 +311,26 @@ func TestEventsSendSnapshotAndCloseWithServer(t *testing.T) {
 	defer response.Body.Close()
 	reader := bufio.NewReader(response.Body)
 	found := false
+	name := ""
 	for !found {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			t.Fatal("事件流没有初始快照", err)
 		}
-		found = strings.HasPrefix(line, "data: ")
+		if strings.HasPrefix(line, "event: ") {
+			name = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+		}
+		if name == "subscriptions" && strings.HasPrefix(line, "data: ") {
+			var result resourceResponse
+			var groups []catalog.GroupSummary
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &result); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(result.Data, &groups); err != nil || len(groups) != 1 || groups[0].ID != "default" || !groups[0].Active {
+				t.Fatalf("订阅事件遗漏本地分组: %+v %v", groups, err)
+			}
+			found = true
+		}
 	}
 	cancel()
 	select {

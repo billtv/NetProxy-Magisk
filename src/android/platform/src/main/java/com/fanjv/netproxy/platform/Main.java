@@ -139,7 +139,9 @@ public final class Main {
             Bitmap image = null;
             try {
                 ApplicationInfo info = manager.getApplicationInfo(name, 0);
-                Drawable drawable = info.loadIcon(manager);
+                // loadIcon 的厂商主题扩展会访问仅注册应用进程可用的 Provider，直接读取原生图标资源。
+                Drawable drawable = info.icon == 0 ? manager.getDefaultActivityIcon()
+                    : manager.getResourcesForApplication(info).getDrawable(info.icon, null);
                 image = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
                 drawable.setBounds(0, 0, size, size);
                 drawable.draw(new Canvas(image));

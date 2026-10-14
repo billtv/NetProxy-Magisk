@@ -105,3 +105,14 @@ func TestAndroidIconsAreValidatedAndRemainCancellable(t *testing.T) {
 		t.Fatal("客户端连接资料包含私钥")
 	}
 }
+
+func TestAndroidIconsAcceptFrameworkPackage(t *testing.T) {
+	s := resourceFixture(t)
+	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
+		if request.Operation != "icons" || len(request.Packages) != 1 || request.Packages[0] != "android" {
+			t.Fatal(request)
+		}
+		return jsontext.Value(`[]`), nil
+	})
+	resourceAssertSuccess(t, s, "POST", "/api/v1/android/apps/icons", `{"user_id":0,"size":96,"packages":["android"]}`, "android.icons", nil)
+}
