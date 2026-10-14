@@ -140,6 +140,8 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
 	controller := http.NewResponseController(w)
+	// 普通请求读取期限会取消 SSE 长连接；流存活由心跳和写入期限约束。
+	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
 		return

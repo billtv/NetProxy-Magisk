@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,6 +19,11 @@ const workerStartTimeout = 2 * time.Second
 
 // RunProcess 安装系统信号并运行 Worker。
 func RunProcess(ctx context.Context, options Options, logger *log.Logger) error {
+	if runtime.GOOS == "android" {
+		if err := prepareProcessEnvironment(); err != nil {
+			return err
+		}
+	}
 	if err := validateOptions(options); err != nil {
 		return err
 	}
@@ -58,6 +64,11 @@ func RunProcess(ctx context.Context, options Options, logger *log.Logger) error 
 	serverErr := <-serverDone
 	<-wakeDone
 	return errors.Join(err, serverErr)
+}
+
+func prepareProcessEnvironment() error {
+	// 安装目录和 TMPDIR 会被删除，不能让长期宿主与子进程继承它们。
+	return errors.Join(os.Chdir("/"), os.Unsetenv("TMPDIR"))
 }
 
 // Start 启动唯一后台实例；API 不因核心停止或没有调度任务而退出。

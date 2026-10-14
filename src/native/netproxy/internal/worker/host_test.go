@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+func TestPrepareProcessEnvironmentDiscardsInstallerDirectories(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "deleted-install-directory"))
+	if err := prepareProcessEnvironment(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := os.LookupEnv("TMPDIR"); exists {
+		t.Fatal("仍然继承安装器 TMPDIR")
+	}
+	if working, err := os.Getwd(); err != nil || filepath.Dir(working) != working {
+		t.Fatal("Worker 未使用稳定的根目录", working, err)
+	}
+	temporary, err := os.MkdirTemp("", "netproxy-worker-environment-")
+	if err != nil {
+		t.Fatal("清理安装环境后不能创建校验临时目录", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(temporary) })
+}
+
 func TestHostKeepsPIDUntilHTTPDrainCompletes(t *testing.T) {
 	options := newTestOptions(t.TempDir())
 	options.APIConfig = filepath.Join(t.TempDir(), "api.json")

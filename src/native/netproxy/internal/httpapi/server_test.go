@@ -293,6 +293,47 @@ func TestDiagnosticDownloadIsCompleteAndOmitsCredentials(t *testing.T) {
 	}
 }
 
+func TestEventsRemainConnectedPastRequestReadDeadline(t *testing.T) {
+	server, cancel, done := serveFixture(t)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("事件流阻止管理服务停止")
+		}
+	})
+	ctx, stop := context.WithTimeout(t.Context(), 25*time.Second)
+	defer stop()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.config.Connection().Address+"/api/v1/events?topics=groups", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatal(response.Status)
+	}
+	reader := bufio.NewScanner(response.Body)
+	for heartbeats := 0; heartbeats < 2; {
+		if !reader.Scan() {
+			t.Fatal("SSE 在普通请求读取期限后断开", reader.Err())
+		}
+		if reader.Text() == ": heartbeat" {
+			heartbeats++
+		}
+	}
+}
+
 func TestEventsSendSnapshotAndCloseWithServer(t *testing.T) {
 	server, cancel, done := serveFixture(t)
 	ctx, stop := context.WithTimeout(t.Context(), 3*time.Second)

@@ -77,9 +77,11 @@ src/module/service.sh
 - `src/native/netproxy` 是 Catalog、Provider、订阅事务、配置、eBPF 运行时、Service API 与 sing-box 生命周期的业务事实源；Shell 只负责模块 service 阶段进入 Go 的平台桥接。
 - 模块、配置、Catalog、运行时、日志、二进制与 `/dev/netproxy` 状态路径统一由 `internal/paths.Layout` 推导。生产代码不得自行拼接这些布局；测试和用户指定的导入、导出、临时路径仍可显式注入。
 - 允许且仅允许一个长期 Go 后台宿主，复用 Worker 进程身份。HTTP 管理服务、订阅调度、Android 网络监听和设备统计并列运行；调度配置错误不得关闭管理接口。PID 所有权覆盖 HTTP 事务收尾，不能在调度退出时提前释放。HTTP 不执行 CLI 或 Shell，不新增第二个守护进程或代理核心。
+- Android Worker 进入长期运行前必须切换到稳定的 `/` 工作目录并清除继承的 `TMPDIR`，使用 Android 原生临时目录；安装器临时目录删除后会使 ART 初始化 `user.dir` 原生崩溃，或使配置校验报 `stat /dev/tmp`。不能仅修复单个 Java 调用或配置保存入口。
 - 模块 HTTP API 的唯一监听与凭据事实源为 `config/api.json`，仅允许 loopback IP 和专用随机 256 bit secret；安装通过 `api init` 显式初始化，已有或损坏文件不得覆盖。API 使用每安装独立的 TLS 证书与私钥，凭据通过 Root 的 `api access` 或固定签名验证后的私有 Provider 交付，不进入日志、诊断、遥测或 URL。客户端校验证书 SHA-256，不允许明文、系统代理、重定向或 Root 回退。HTTP 同时检查 Host、Origin 与 Bearer header，不能用 loopback 代替鉴权或允许通配 CORS。
 - HTTP 复用 `schema=1`、原错误码、revision 和持久化副作用语义。客户端断线不取消已接受写入；服务关闭停止准入，并等待有界事务收尾。上传与下载仅使用服务端私有临时文件或内容接口，不接受设备路径。SSE 只在有订阅者时共享核心流，先发完整快照；旧核心启动身份的帧必须丢弃，慢客户端不得无限缓存。
 - HTTP 的 `HEAD` 不进入领域函数或 SSE。节点添加、编辑与导入直接传内容，共用 CLI 的领域事务，不落临时输入文件。SSE 文件事件按相关主题合并刷新，溢出必须重新校准快照；监听失效必须断开，不能保持连接却静默漏报。
+- SSE 通过鉴权并进入事件流后必须清除普通请求的读取期限，保留心跳和逐帧写入期限；否则 HTTP/1.1 后台读取会在 15 秒超时后取消连接，管理器反复提示事件连接断开。
 - 设备统计只从 Go 公共命令与真实核心启动采集 `module_active`、`service_start_result`，不增加 Android/WebUI SDK。Worker 以 Root 查询用户 0 的 `ANDROID_ID`，用固定 NetProxy 命名空间的 SHA-256 派生设备身份，每个 Worker 成功读取后只缓存在内存；读取失败不得回退随机身份。CLI 不查询设备标识，`config/telemetry/state.json` 只保存每日去重和有界队列，不进入编辑器、日志或诊断包；原始标识不得落盘或上传，Token 只由构建注入。损坏状态不得静默覆盖，系统查询和网络请求不得持有状态锁，上传不得阻塞业务命令。停服入口不得为统计重新启动 Worker，以免停服操作产生后台启动副作用。
 - 使用 reF1nd sing-box 的类型定义解析、生成和校验 Provider，不通过字符串替换拼接协议配置。
 - reF1nd 依赖版本必须与打包的 sing-box 内核兼容；升级时同时验证转换 fixtures、Provider 和 Service API。
