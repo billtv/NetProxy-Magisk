@@ -1,7 +1,6 @@
 package com.fanjv.netproxy.feature.apps.data
 
 import com.fanjv.netproxy.core.api.ModuleApiClient
-import com.fanjv.netproxy.feature.apps.model.UserInfo
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -19,50 +18,32 @@ internal data class AndroidApp(
 )
 
 @Serializable
-private data class AndroidUser(val id: Int, val name: String)
+internal data class AndroidUserApps(val id: Int, val name: String, val revision: String, val apps: List<AndroidApp>)
 @Serializable
-private data class AndroidApps(val user_id: Int, val revision: String, val apps: List<AndroidApp>)
+internal data class AndroidAppsSnapshot(val users: List<AndroidUserApps>)
 
 internal class AppPackageRepository(private val client: ModuleApiClient) {
     private val mutex = Mutex()
-    private var users: List<UserInfo>? = null
-    private val applications = HashMap<String, AndroidApps>()
-    private var generation = 0L
-    private val queries = HashMap<String, Mutex>()
-
-    suspend fun getUsers(): List<UserInfo> {
-        val (version, query) = mutex.withLock {
-            users?.let { return it }
-            generation to queries.getOrPut("users") { Mutex() }
-        }
-        return query.withLock {
-            mutex.withLock { if (generation == version) users?.let { return@withLock it } else null }?.let { return@withLock it }
-            val result = client.read<List<AndroidUser>>("/android/users").map { UserInfo(it.id.toString(), it.name) }
-            mutex.withLock { if (generation == version) users = result }
-            result
-        }
+    private class Generation {
+        val query = Mutex()
+        var snapshot: AndroidAppsSnapshot? = null
     }
+    private var generation = Generation()
 
-    suspend fun getApplications(user: String = "0", size: Int = 96): List<AndroidApp> {
-        val key = "$user:$size"
-        val (version, query) = mutex.withLock {
-            applications[key]?.let { return it.apps }
-            generation to queries.getOrPut("apps:$key") { Mutex() }
-        }
-        return query.withLock {
-            mutex.withLock { if (generation == version) applications[key] else null }?.let { return@withLock it.apps }
-            val result = client.read<AndroidApps>("/android/apps", mapOf("user_id" to user, "size" to size.toString()))
-            mutex.withLock { if (generation == version) applications[key] = result }
-            result.apps
+    suspend fun snapshot(): AndroidAppsSnapshot {
+        val current = mutex.withLock { generation }
+        return current.query.withLock {
+            current.snapshot?.let { return@withLock it }
+            val result = client.read<AndroidAppsSnapshot>("/android/apps")
+            // 旧请求只填充旧代的快照，不得覆盖失效后创建的新缓存。
+            current.snapshot = result
+            result
         }
     }
 
     suspend fun icon(key: String): ByteArray = client.image("/android/icons/$key")
 
     suspend fun invalidatePackageListingCaches() = mutex.withLock {
-        users = null
-        applications.clear()
-        queries.clear()
-        generation++
+        generation = Generation()
     }
 }

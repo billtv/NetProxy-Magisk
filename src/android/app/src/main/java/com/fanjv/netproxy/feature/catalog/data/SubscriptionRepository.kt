@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.map
 internal class SubscriptionRepository(private val client: ModuleApiClient) {
     suspend fun list(): List<CatalogGroupSummary> = client.read("/subscriptions")
     fun observe() = client.observe(setOf("subscriptions")).map { result -> result.mapCatching { events ->
-        client.json.decodeFromJsonElement<List<CatalogGroupSummary>>(events.getValue("subscriptions").data)
+        events.getValue("subscriptions").decode<List<CatalogGroupSummary>>()
     } }
     suspend fun details(id: String): CatalogNodeGroup = client.read("/subscriptions/$id")
     suspend fun readEditor(id: String): SubscriptionEditorState = client.read("/subscriptions/$id", mapOf("private" to "true"))

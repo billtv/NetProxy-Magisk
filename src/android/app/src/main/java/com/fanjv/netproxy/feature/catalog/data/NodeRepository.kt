@@ -13,7 +13,7 @@ internal data class ExportedNodeLink(val tag: String, val protocol: String, val 
 internal class NodeRepository(private val client: ModuleApiClient) {
     suspend fun snapshot(): CatalogNodesSnapshot = client.read("/nodes/snapshot")
     fun observe() = client.observe(setOf("groups")).map { result -> result.mapCatching {
-        client.json.decodeFromJsonElement<CatalogNodesSnapshot>(it.getValue("groups").data)
+        it.getValue("groups").decode<CatalogNodesSnapshot>()
     } }
 
     suspend fun add(link: String) {

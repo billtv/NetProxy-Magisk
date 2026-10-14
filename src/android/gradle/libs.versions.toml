@@ -18,6 +18,7 @@ miuix = "0.9.4"
 hiddenapibypass = "6.1"
 junit = "4.13.2"
 coroutinesTest = "1.9.0"
+okhttp = "5.5.0"
 
 [libraries]
 # AndroidX
@@ -47,6 +48,8 @@ miuix-squircle = { module = "top.yukonga.miuix.kmp:miuix-squircle-android", vers
 hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutinesTest" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+okhttp-mockwebserver = { module = "com.squareup.okhttp3:mockwebserver3", version.ref = "okhttp" }
 scripta-editor = { module = "scripta:editor" }
 
 

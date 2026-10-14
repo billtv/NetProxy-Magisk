@@ -70,7 +70,7 @@ func New(options moduleapp.Options, config apiconfig.Config) (*Server, error) {
 	}
 	s := &Server{options: options, config: config, mux: http.NewServeMux(),
 		instance: hex.EncodeToString(identity[:]), expensive: make(chan struct{}, 4), writeSlots: make(chan struct{}, 8),
-		platform: androidplatform.Client{DEX: paths.New(options.ModuleDir).AndroidPlatformDEX()}, platformSlots: make(chan struct{}, 2)}
+		platform: androidplatform.Client{DEX: paths.New(options.ModuleDir).AndroidPlatformDEX()}, platformSlots: make(chan struct{}, 1)}
 	s.lifetime, s.stopEvents = context.WithCancel(context.Background())
 	s.options.TransferContext = s.lifetime
 	s.version, s.versionCode = readModuleVersion(paths.New(options.ModuleDir).ModuleProp())
@@ -119,14 +119,6 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener) error
 	server := &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	if runtime.GOOS == "android" || runtime.GOOS == "linux" && platformPresent() {
-		s.inFlight.Add(1)
-		go func() {
-			defer s.inFlight.Done()
-			request, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.config.Connection().Address+"/api/v1/auth/provision", nil)
-			_, _ = s.provisionClient(ctx, request)
-		}()
-	}
 	var serveErr error
 	finished := false
 	select {
@@ -278,24 +270,27 @@ func failureStatus(code string, err error) int {
 	if _, ok := errors.AsType[*inbound.ValidationError](err); ok {
 		return http.StatusUnprocessableEntity
 	}
-	switch {
-	case code == "usage.invalid", code == "api.query_invalid":
+	switch code {
+	case "usage.invalid", "api.query_invalid":
 		return http.StatusBadRequest
-	case slices.Contains([]string{"config.conflict", "subscription.conflict", "subscription.busy", "api.busy", "node.delay_busy"}, code):
+	case "config.conflict", "subscription.conflict", "subscription.busy", "api.busy", "node.delay_busy":
 		return http.StatusConflict
-	case code == "android.icon.not_found", code == "node.delay_target_missing", errors.Is(err, os.ErrNotExist):
+	case "android.icon.not_found", "node.delay_target_missing":
 		return http.StatusNotFound
-	case code == "command.timeout", code == "node.delay_timeout":
+	case "command.timeout", "node.delay_timeout":
 		return http.StatusGatewayTimeout
-	case code == "command.canceled", code == "subscription.cancelled":
+	case "command.canceled", "subscription.cancelled":
 		return http.StatusRequestTimeout
-	case slices.Contains([]string{"node.runtime_sync_failed", "mode.runtime_sync_failed", "subscription.runtime_sync_failed", "node.delay_api_failed"}, code):
+	case "node.runtime_sync_failed", "mode.runtime_sync_failed", "subscription.runtime_sync_failed", "node.delay_api_failed":
 		return http.StatusBadGateway
-	case slices.Contains([]string{"subscription.invalid_target", "subscription.invalid_group", "subscription.read_only", "subscription.interval_too_short",
+	case "subscription.invalid_target", "subscription.invalid_group", "subscription.read_only", "subscription.interval_too_short",
 		"subscription.edit_invalid", "subscription.proxy_mode_invalid", "subscription.timeout_invalid", "subscription.text_invalid", "mode.invalid", "mode.unavailable",
-		"ebpf.status_invalid", "ebpf.unsupported", "network.direct_route_required"}, code):
+		"ebpf.status_invalid", "ebpf.unsupported", "network.direct_route_required":
 		return http.StatusUnprocessableEntity
 	default:
+		if errors.Is(err, os.ErrNotExist) {
+			return http.StatusNotFound
+		}
 		return http.StatusInternalServerError
 	}
 }

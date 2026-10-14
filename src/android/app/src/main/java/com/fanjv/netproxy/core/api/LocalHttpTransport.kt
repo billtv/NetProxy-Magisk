@@ -1,55 +1,82 @@
 package com.fanjv.netproxy.core.api
 
 import android.content.Context
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.ConnectionPool
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.File
+import java.io.FilterInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Proxy
-import java.net.URL
-import java.net.URLEncoder
+import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
-import java.util.concurrent.atomic.AtomicBoolean
-import javax.net.ssl.HttpsURLConnection
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLHandshakeException
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.TrustManager
+import javax.net.ssl.SSLException
 import javax.net.ssl.X509TrustManager
+import javax.net.SocketFactory
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
-internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
+internal class LocalHttpTransport internal constructor(
+    private val connections: ConnectionStore,
+    private val defaultAddress: String = "https://127.0.0.1:9091",
+) : ModuleApiTransport {
+    constructor(context: Context) : this(ConnectionStore(context.applicationContext))
+
     internal val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
-    private val connections = ConnectionStore(context.applicationContext)
     private val pairing = Mutex()
-    private var pinnedFactory: Pair<String, SSLSocketFactory>? = null
+    @Volatile private var address = defaultAddress
+    @Volatile private var pinnedClient: Pair<String, OkHttpClient>? = null
+    private val provisioningClient by lazy { client(null).newBuilder().connectTimeout(3, TimeUnit.SECONDS).build() }
 
     suspend fun connect(): ModuleConnection = withContext(Dispatchers.IO) {
-        pairing.withLock {
-            val existing = connections.read()
-            if (existing != null) return@withLock existing
-            provisionConnection("https://127.0.0.1:9091")
-        }
+        connections.read()?.let { return@withContext it }
+        pairing.withLock { connections.read() ?: provisionConnection(address) }
     }
 
     override suspend fun reconnect(address: String): Unit = withContext(Dispatchers.IO) {
         validateModuleAddress(address)
-        pairing.withLock { provisionConnection(address) }
+        pairing.withLock {
+            this@LocalHttpTransport.address = address
+            connections.invalidate()
+            provisionConnection(address)
+        }
     }
 
     private suspend fun provisionConnection(address: String): ModuleConnection {
-        provision(address)
+        // 未认证连接只触发私有 Provider 交付，独立客户端不携带 Bearer，也不复用业务连接。
+        val request = Request.Builder().url("$address/api/v1/auth/provision")
+            .post("{}".toRequestBody(JSON_MEDIA_TYPE)).build()
+        execute(provisioningClient, request, null, 20_000) { response ->
+            LimitedInputStream(response.body.byteStream(), 64 * 1024).use { it.readBytes() }
+        }
         repeat(20) {
             connections.read()?.takeIf { it.address == address }?.let { return it }
             delay(100)
@@ -57,71 +84,54 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
         throw ModuleApiException("api.connection_unavailable", "无法自动连接模块后台")
     }
 
-    override suspend fun request(method: String, path: String, body: JsonObject?,
-        query: Map<String, String>, mutation: Boolean): ModuleHttpResponse =
-        withContext(Dispatchers.IO) {
-            val credentials = connect()
-            val connection = open(credentials, path, query)
-            connection.requestMethod = method
-            connection.readTimeout = if (path == "/android/apps") 60_000 else if (!mutation) 30_000 else if (path.startsWith("/subscriptions")) 615_000 else 135_000
-            try {
-                withHttpConnection(connection) {
-                    if (body != null) {
-                        connection.doOutput = true
-                        connection.setRequestProperty("Content-Type", "application/json")
-                        val bytes = body.toString().toByteArray(Charsets.UTF_8)
-                        connection.setFixedLengthStreamingMode(bytes.size)
-                        connection.outputStream.use { it.write(bytes) }
-                    }
-                    val status = connection.responseCode
-                    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                    val text = stream?.use { input ->
-                        val bytes = input.readBytesLimited(8 * 1024 * 1024)
-                        String(bytes, Charsets.UTF_8)
-                    }.orEmpty()
-                    if (status == 401) renew(credentials.address)
-                    ModuleHttpResponse(status, text)
-                }
-            } catch (error: ModuleApiException) { throw error }
-            catch (error: CancellationException) { throw error }
-            catch (_: SSLHandshakeException) {
-                currentCoroutineContext().ensureActive()
-                renew(credentials.address)
-                throw ModuleApiException("api.unauthorized", "模块身份验证失败，请重新连接")
-            }
-            catch (_: Exception) {
-                currentCoroutineContext().ensureActive()
-                throw ModuleApiException("api.connection_failed", "无法连接模块后台，操作结果需要重新确认")
-            }
+    override suspend fun <T> request(
+        method: String,
+        path: String,
+        body: JsonObject?,
+        query: Map<String, String>,
+        mutation: Boolean,
+        decode: (Int, InputStream) -> T,
+    ): T {
+        val credentials = connect()
+        val timeout = when {
+            path == "/android/apps" -> 60_000L
+            !mutation -> 30_000L
+            path.startsWith("/subscriptions") -> 615_000L
+            else -> 135_000L
         }
-
-    override suspend fun image(path: String): ByteArray = withContext(Dispatchers.IO) {
-        val connection = open(connect(), path, emptyMap())
-        connection.readTimeout = 15_000
-        withHttpConnection(connection) {
-            val status = connection.responseCode
-            if (status != 200) {
-                ModuleApiCodec(json).decode(status, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
-                throw ModuleApiException("api.image_failed", "无法读取应用图标")
-            }
-            require(connection.contentType == "image/png")
-            connection.inputStream.use { it.readBytesLimited(256 * 1024) }
+        val request = requestBuilder(credentials, path, query)
+            .method(method, body?.toString()?.toRequestBody(JSON_MEDIA_TYPE)).build()
+        return execute(pinned(credentials.certificate_sha256), request, credentials, timeout) { response ->
+            decode(response.code, LimitedInputStream(response.body.byteStream(), RESPONSE_LIMIT))
         }
     }
 
-    override suspend fun download(path: String, query: Map<String, String>, destination: File) = withContext(Dispatchers.IO) {
-        val connection = open(connect(), path, query)
-        connection.readTimeout = 150_000
+    override suspend fun image(path: String): ByteArray {
+        val credentials = connect()
+        return execute(pinned(credentials.certificate_sha256), requestBuilder(credentials, path, emptyMap()).build(),
+            credentials, 15_000) { response ->
+            if (response.code != 200) fail(response, "api.image_failed", "无法读取应用图标")
+            require(response.body.contentType()?.toString() == "image/png")
+            LimitedInputStream(response.body.byteStream(), 256 * 1024).readBytes()
+        }
+    }
+
+    override suspend fun download(path: String, query: Map<String, String>, destination: File) {
         try {
-            withHttpConnection(connection) {
-                val status = connection.responseCode
-                if (status !in 200..299) {
-                    ModuleApiCodec(json).decode(status, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
-                    throw ModuleApiException("api.download_failed", "诊断包下载失败")
+            val credentials = connect()
+            execute(pinned(credentials.certificate_sha256), requestBuilder(credentials, path, query).build(),
+                credentials, 150_000) { response ->
+                if (!response.isSuccessful) fail(response, "api.download_failed", "诊断包下载失败")
+                require(response.body.contentType()?.toString() == "application/gzip")
+                try {
+                    val count = destination.outputStream().use { output -> response.body.byteStream().copyTo(output) }
+                    val length = response.body.contentLength()
+                    require(count > 0 && (length < 0 || count == length))
+                } catch (error: Throwable) {
+                    // 取消可能先唤醒调用方，正文线程须在关闭文件后再次清理部分下载。
+                    destination.delete()
+                    throw error
                 }
-                require(connection.contentType == "application/gzip")
-                val count = destination.outputStream().use { output -> connection.inputStream.use { it.copyTo(output) } }
-                require(count > 0 && (connection.contentLengthLong < 0 || count == connection.contentLengthLong))
             }
         } catch (error: Throwable) {
             destination.delete()
@@ -129,126 +139,219 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
         }
     }
 
-    override suspend fun watch(topics: Set<String>, consume: suspend (ModuleEvent) -> Unit): Unit = withContext(Dispatchers.IO) {
-        val connection = open(connect(), "/events", mapOf("topics" to topics.sorted().joinToString(",")))
-        connection.setRequestProperty("Connection", "close")
-        connection.readTimeout = 30_000
-        withHttpConnection(connection) {
-            if (connection.responseCode != 200) {
-                ModuleApiCodec(json).decode(connection.responseCode, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
-                throw ModuleApiException("api.events_failed", "无法订阅模块事件")
-            }
-            require(connection.contentType.startsWith("text/event-stream"))
-            connection.inputStream.bufferedReader().use { reader ->
-                var name = ""
-                val data = StringBuilder()
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    require(line.length + data.length <= 8 * 1024 * 1024)
-                    when {
-                        line.isEmpty() -> {
-                            if (data.isNotEmpty()) {
-                                require(name in setOf("status", "traffic", "groups", "subscriptions"))
-                                consume(ModuleEvent(name, data.toString()))
+    override suspend fun watch(topics: Set<String>, consume: suspend (ModuleEvent) -> Unit) {
+        val credentials = connect()
+        val request = requestBuilder(credentials, "/events", mapOf("topics" to topics.sorted().joinToString(",")))
+            .header("Connection", "close").build()
+        val client = pinned(credentials.certificate_sha256).newBuilder()
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
+            .protocols(listOf(Protocol.HTTP_1_1)).readTimeout(30, TimeUnit.SECONDS).build()
+        callbackFlow<ModuleEvent> {
+            val call = client.newCall(request)
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    close(transportError(e, credentials, call))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        response.use {
+                            invalidateUnauthorized(response, credentials)
+                            if (response.code != 200) fail(response, "api.events_failed", "无法订阅模块事件")
+                            require(response.body.contentType()?.let { it.type == "text" && it.subtype == "event-stream" } == true)
+                            val source = response.body.source()
+                            var name = ""
+                            val data = StringBuilder()
+                            var size = 0L
+                            while (!call.isCanceled() && !source.exhausted()) {
+                                val line = source.readUtf8LineStrict(RESPONSE_LIMIT - size)
+                                size += line.toByteArray(Charsets.UTF_8).size + 1
+                                require(size <= RESPONSE_LIMIT)
+                                when {
+                                    line.isEmpty() -> {
+                                        if (data.isNotEmpty()) {
+                                            require(name in EVENT_NAMES)
+                                            if (trySendBlocking(ModuleEvent(name, data.toString())).isFailure) return
+                                        }
+                                        name = ""
+                                        data.setLength(0)
+                                        size = 0
+                                    }
+                                    line.startsWith("event:") -> name = line.substringAfter(':').trim()
+                                    line.startsWith("data:") -> {
+                                        if (data.isNotEmpty()) data.append('\n')
+                                        data.append(line.substringAfter(':').removePrefix(" "))
+                                    }
+                                }
                             }
-                            name = ""; data.setLength(0)
+                            throw ModuleApiException("api.disconnected", "模块事件连接已断开")
                         }
-                        line.startsWith("event:") -> name = line.substringAfter(':').trim()
-                        line.startsWith("data:") -> { if (data.isNotEmpty()) data.append('\n'); data.append(line.substringAfter(':').removePrefix(" ")) }
+                    } catch (error: Exception) {
+                        close(transportError(error, credentials, call))
                     }
                 }
-            }
-        }
+            })
+            awaitClose { call.cancel() }
+        }.buffer(1).collect { consume(it) }
     }
 
-    private fun open(credentials: ModuleConnection, path: String, query: Map<String, String>): HttpsURLConnection {
+    private fun requestBuilder(credentials: ModuleConnection, path: String, query: Map<String, String>): Request.Builder {
         require(path.startsWith('/') && !path.contains('?') && !path.contains('#'))
-        val suffix = query.entries.joinToString("&") { (key, value) -> "${encode(key)}=${encode(value)}" }
-        return (URL(credentials.address + "/api/v1" + path + if (suffix.isEmpty()) "" else "?$suffix")
-            .openConnection(Proxy.NO_PROXY) as HttpsURLConnection).apply {
-            connectTimeout = 5_000
-            instanceFollowRedirects = false
-            useCaches = false
-            sslSocketFactory = pinnedTLS(credentials.certificate_sha256)
-            setRequestProperty("Authorization", "Bearer ${credentials.secret}")
-        }
+        val url = (credentials.address + "/api/v1" + path).toHttpUrl().newBuilder()
+        query.forEach { (key, value) -> url.addQueryParameter(key, value) }
+        return Request.Builder().url(url.build()).header("Authorization", "Bearer ${credentials.secret}")
     }
 
-    private suspend fun provision(address: String) {
-        // 未认证连接只触发向私有 Provider 交付，不发送或接收秘密，也不复用到业务请求。
-        val connection = URL("$address/api/v1/auth/provision").openConnection(Proxy.NO_PROXY) as HttpsURLConnection
-        connection.sslSocketFactory = tls(null).socketFactory
-        connection.connectTimeout = 3_000
-        connection.readTimeout = 20_000
-        connection.instanceFollowRedirects = false
-        connection.requestMethod = "POST"
-        connection.doOutput = true
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setFixedLengthStreamingMode(2)
-        withHttpConnection(connection) {
-            connection.outputStream.use { it.write("{}".toByteArray()) }
-            val status = connection.responseCode
-            (if (status in 200..299) connection.inputStream else connection.errorStream)
-                ?.use { it.readBytesLimited(64 * 1024) }
-        }
-    }
-
-    private suspend fun renew(address: String) = pairing.withLock {
-        // 更新交付副本后仍返回原请求结果，不能重发可能已被接受的写入。
-        try { provision(address) } catch (_: Exception) { currentCoroutineContext().ensureActive() }
-    }
-
-    @Synchronized
-    private fun pinnedTLS(fingerprint: String): SSLSocketFactory {
-        pinnedFactory?.takeIf { it.first == fingerprint }?.let { return it.second }
-        return tls(fingerprint).socketFactory.also { pinnedFactory = fingerprint to it }
-    }
-
-    private fun tls(fingerprint: String?): SSLContext = SSLContext.getInstance("TLS").apply {
-        init(null, arrayOf<TrustManager>(object : X509TrustManager {
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = throw java.security.cert.CertificateException()
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                if (fingerprint == null) return
-                val certificate = chain?.singleOrNull() ?: throw java.security.cert.CertificateException()
-                certificate.checkValidity()
-                val hash = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
-                    .joinToString("") { "%02x".format(it) }
-                if (hash != fingerprint) throw java.security.cert.CertificateException()
+    private suspend fun <T> execute(
+        client: OkHttpClient,
+        request: Request,
+        credentials: ModuleConnection?,
+        timeout: Long,
+        decode: (Response) -> T,
+    ): T = suspendCancellableCoroutine { continuation ->
+        val call = client.newBuilder().readTimeout(timeout, TimeUnit.MILLISECONDS)
+            .callTimeout(timeout + 5_000, TimeUnit.MILLISECONDS).build().newCall(request)
+        // continuation 保持到正文解码结束，取消始终只作用于当前 Call。
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                continuation.resumeWithException(transportError(e, credentials, call))
             }
-        }), SecureRandom())
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val result = response.use {
+                        invalidateUnauthorized(response, credentials)
+                        decode(response)
+                    }
+                    continuation.resume(result)
+                } catch (error: Exception) {
+                    continuation.resumeWithException(transportError(error, credentials, call))
+                }
+            }
+        })
     }
 
-    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
-}
-
-internal suspend fun <T> withHttpConnection(connection: HttpsURLConnection, operation: suspend () -> T): T = coroutineScope {
-    val finished = AtomicBoolean(false)
-    val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
-        try { awaitCancellation() } finally {
-            if (finished.compareAndSet(false, true)) connection.disconnect()
+    private fun invalidateUnauthorized(response: Response, credentials: ModuleConnection?) {
+        if (response.code == 401 && credentials != null) {
+            if (connections.invalidate(credentials)) address = credentials.address
         }
     }
-    try {
-        operation()
-    } catch (error: Throwable) {
-        if (finished.compareAndSet(false, true)) connection.disconnect()
-        throw error
-    } finally {
-        // 正常读取关闭流后连接已归还连接池，再 disconnect 可能中断复用它的另一个请求。
-        finished.set(true)
-        cancellation.cancel()
+
+    private fun transportError(error: Exception, credentials: ModuleConnection?, call: Call): Exception = when {
+        error is SSLException && !call.isCanceled() && credentials != null -> {
+            if (connections.invalidate(credentials)) address = credentials.address
+            ModuleApiException("api.unauthorized", "模块身份验证失败，请重新连接")
+        }
+        error is IOException -> ModuleApiException("api.connection_failed", "无法连接模块后台，操作结果需要重新确认")
+        else -> error
+    }
+
+    private fun fail(response: Response, code: String, message: String): Nothing {
+        ModuleApiCodec(json).decode(response.code, LimitedInputStream(response.body.byteStream(), 64 * 1024))
+        throw ModuleApiException(code, message)
+    }
+
+    private fun pinned(fingerprint: String): OkHttpClient {
+        pinnedClient?.takeIf { it.first == fingerprint }?.let { return it.second }
+        return synchronized(this) {
+            pinnedClient?.takeIf { it.first == fingerprint }?.second
+                ?: client(fingerprint).also { pinnedClient = fingerprint to it }
+        }
+    }
+
+    private fun client(fingerprint: String?): OkHttpClient {
+        val expected = fingerprint?.chunked(2)?.map { it.toInt(16).toByte() }?.toByteArray()
+        val trust = object : X509TrustManager {
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = throw CertificateException()
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                if (expected == null) return
+                val certificate = chain?.singleOrNull() ?: throw CertificateException()
+                certificate.checkValidity()
+                val actual = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
+                if (!MessageDigest.isEqual(actual, expected)) throw CertificateException()
+            }
+        }
+        val tls = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), SecureRandom()) }
+        return OkHttpClient.Builder().proxy(Proxy.NO_PROXY).socketFactory(DirectSocketFactory)
+            .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
+            .addNetworkInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                // OkHttp 的 503 Retry-After 重发不受连接重试开关控制，领域请求必须只发一次。
+                if (response.code == 503) response.newBuilder().removeHeader("Retry-After").build() else response
+            }
+            .connectTimeout(5, TimeUnit.SECONDS).sslSocketFactory(tls.socketFactory, trust).build()
+    }
+
+    private companion object {
+        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        const val RESPONSE_LIMIT = 8 * 1024 * 1024
+        val EVENT_NAMES = setOf("status", "traffic", "groups", "subscriptions")
     }
 }
 
-private fun java.io.InputStream.readBytesLimited(limit: Int): ByteArray {
-    val output = java.io.ByteArrayOutputStream()
-    val buffer = ByteArray(8192)
-    while (true) {
-        val size = read(buffer)
-        if (size < 0) break
-        require(output.size() + size <= limit)
-        output.write(buffer, 0, size)
+private object DirectSocketFactory : SocketFactory() {
+    // 同时绕过底层 Socket 的 SOCKS ProxySelector，不能只禁用 HTTP 代理。
+    override fun createSocket() = Socket(Proxy.NO_PROXY)
+    override fun createSocket(host: String, port: Int) = connected(InetSocketAddress(host, port))
+    override fun createSocket(host: InetAddress, port: Int) = connected(InetSocketAddress(host, port))
+    override fun createSocket(host: String, port: Int, local: InetAddress, localPort: Int) =
+        connected(InetSocketAddress(host, port), InetSocketAddress(local, localPort))
+    override fun createSocket(host: InetAddress, port: Int, local: InetAddress, localPort: Int) =
+        connected(InetSocketAddress(host, port), InetSocketAddress(local, localPort))
+
+    private fun connected(remote: InetSocketAddress, local: InetSocketAddress? = null): Socket {
+        val socket = createSocket()
+        try {
+            if (local != null) socket.bind(local)
+            socket.connect(remote)
+            return socket
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            throw error
+        }
     }
-    return output.toByteArray()
+}
+
+internal class LimitedInputStream(input: InputStream, private val limit: Int) : FilterInputStream(input) {
+    private var count = 0
+
+    override fun read(): Int {
+        checkLimit()
+        val value = `in`.read()
+        if (value >= 0) record(1)
+        return value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length < 0 || offset > buffer.size - length) throw IndexOutOfBoundsException()
+        if (length == 0) return 0
+        checkLimit()
+        val size = `in`.read(buffer, offset, minOf(length, limit - count + 1))
+        if (size > 0) record(size)
+        return size
+    }
+
+    override fun skip(size: Long): Long {
+        if (size <= 0) return 0
+        checkLimit()
+        val skipped = `in`.skip(minOf(size, (limit - count + 1).toLong()))
+        record(skipped.toInt())
+        return skipped
+    }
+
+    override fun markSupported() = false
+    override fun available(): Int = minOf(`in`.available(), (limit - count).coerceAtLeast(0))
+    override fun mark(readlimit: Int) = Unit
+    override fun reset(): Unit = throw IOException("Response stream cannot reset")
+
+    private fun record(size: Int) {
+        count += size
+        checkLimit()
+    }
+
+    private fun checkLimit() {
+        if (count > limit) throw IOException("Response body exceeds limit")
+    }
 }

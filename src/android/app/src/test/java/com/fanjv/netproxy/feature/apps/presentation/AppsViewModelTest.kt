@@ -66,12 +66,12 @@ class AppsViewModelTest {
     private fun packages(label: (String) -> String = { it }) = AppPackageRepository(
         ModuleApiClient(TestApiTransport { request ->
             val data = when (request.path) {
-                "/android/users" -> """[{"id":0,"name":"Owner"}]"""
                 "/android/apps" -> {
+                    assertTrue(request.query.isEmpty())
                     val apps = listOf("alpha.example", "beta.example", "system.example").map { name ->
                         AndroidApp(name, label(name), 10000, name.startsWith("system"), 1, 1, "")
                     }
-                    """{"user_id":0,"revision":"apps","apps":${Json.encodeToString(apps)}}"""
+                    """{"users":[{"id":0,"name":"Owner","revision":"apps","apps":${Json.encodeToString(apps)}}]}"""
                 }
                 else -> error("Unexpected request")
             }
@@ -96,6 +96,63 @@ class AppsViewModelTest {
             state.first { !it.isSavingPolicy }
         } while (state.value.hasPendingPolicy && !state.value.requiresPolicyReload)
         !state.value.requiresPolicyReload && !state.value.hasPendingPolicy
+    }
+
+    @Test fun oneSnapshotLoadsAllUsersInParallelWithPolicy() = runBlocking {
+        val transport = Transport()
+        val policyEntered = CompletableDeferred<Unit>()
+        val snapshotEntered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        transport.before = {
+            policyEntered.complete(Unit)
+            withTimeout(5_000) { release.await() }
+        }
+        val catalog = AppPackageRepository(ModuleApiClient(TestApiTransport { request ->
+            assertEquals("/android/apps", request.path)
+            assertTrue(request.query.isEmpty())
+            calls.incrementAndGet()
+            snapshotEntered.complete(Unit)
+            withTimeout(5_000) { release.await() }
+            val owner = AndroidApp("same.example", "Owner app", 10001, false, 1, 1, "a".repeat(64))
+            val work = owner.copy(label = "Work app", uid = 1010001, iconKey = "b".repeat(64))
+            apiSuccess(Json.encodeToString(AndroidAppsSnapshot(listOf(
+                AndroidUserApps(0, "Owner", "owner", listOf(owner)),
+                AndroidUserApps(10, "Work", "work", listOf(work)),
+            ))))
+        }))
+        val vm = model(this, transport, catalog)
+        try {
+            vm.load()
+            withTimeout(5_000) { policyEntered.await(); snapshotEntered.await() }
+        } finally { release.complete(Unit) }
+        vm.loaded()
+        assertEquals(listOf("0:same.example", "10:same.example"), vm.state.value.masterAppList.map { it.id })
+        assertEquals(listOf("Owner app", "Work app"), vm.state.value.masterAppList.map { it.label })
+        assertEquals(listOf("a".repeat(64), "b".repeat(64)), vm.state.value.masterAppList.map { it.iconKey })
+        repeat(3) { vm.load() }
+        assertEquals(1, calls.get())
+    }
+
+    @Test fun snapshotFailureKeepsLoadedApplicationsAndIconKeys() = runBlocking {
+        var failing = false
+        val catalog = AppPackageRepository(ModuleApiClient(TestApiTransport {
+            if (failing) throw ModuleApiException("android.query_failed", "fixture")
+            val apps = listOf("alpha.example", "beta.example").map {
+                AndroidApp(it, it, 10001, false, 1, 1, "a".repeat(64))
+            }
+            apiSuccess(Json.encodeToString(AndroidAppsSnapshot(listOf(AndroidUserApps(0, "Owner", "owner", apps)))))
+        }))
+        val vm = model(this, Transport(), catalog)
+        vm.load(); vm.loaded()
+        val apps = vm.state.value.masterAppList
+        val revision = AppIconCache.revision
+        failing = true
+        vm.load(force = true)
+        withTimeout(5_000) { vm.state.first { !it.isLoadingApps && it.error.isNotBlank() } }
+        assertSame(apps, vm.state.value.masterAppList)
+        assertEquals(revision, AppIconCache.revision)
+        assertEquals("fixture", vm.state.value.error)
     }
 
     @Test fun defaultPolicyIsOffAndLoadingPreservesSavedPolicy() = runBlocking {

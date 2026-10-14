@@ -15,8 +15,6 @@ import (
 
 type Request struct {
 	Operation  string                `json:"operation"`
-	UserID     uint32                `json:"user_id"`
-	Size       int                   `json:"size,omitempty"`
 	IconCache  string                `json:"icon_cache,omitempty"`
 	Connection *apiconfig.Connection `json:"connection,omitempty"`
 }

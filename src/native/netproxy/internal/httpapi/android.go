@@ -7,13 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/processlock"
 )
 
 type platformQuerier interface {
@@ -24,73 +22,29 @@ var androidIconKey = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 const provisionCooldown = 30 * time.Second
 
-func androidIconSize(size int) int {
-	for _, bucket := range [...]int{48, 96, 144, 192} {
-		if size <= bucket {
-			return bucket
-		}
-	}
-	return 0
-}
-
-func platformPresent() bool {
-	_, err := os.Stat("/system/bin/app_process")
-	return err == nil
-}
-
 func (s *Server) registerAndroid() {
 	s.registerRoute("POST /api/v1/auth/provision", 15*time.Second, false, false, s.provisionClient)
-	s.registerRoute("GET /api/v1/android/users", 15*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
+	s.registerRoute("GET /api/v1/android/apps", 45*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
 		if _, err := resourceQuery(r); err != nil {
 			return contract.Result{}, err
 		}
-		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "users"})
-		return contract.Success("android.users", "Android 用户", data), err
-	})
-	s.registerRoute("GET /api/v1/android/apps", 45*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
-		query, err := resourceQuery(r, "user_id", "size")
-		if err != nil {
+		cache := paths.New(s.options.ModuleDir).AndroidIcons()
+		if err := os.MkdirAll(cache, 0o700); err != nil {
 			return contract.Result{}, err
 		}
-		user, err := strconv.ParseUint(query.Get("user_id"), 10, 32)
-		if err != nil || user > 21474 {
-			return contract.Result{}, invalid("Android 用户 ID 无效")
-		}
-		size := 0
-		if query.Has("size") {
-			size, err = strconv.Atoi(query.Get("size"))
-			if err != nil || size < 16 || size > 192 {
-				return contract.Result{}, invalid("图标尺寸必须为 16–192 像素")
-			}
-			size = androidIconSize(size)
-		}
-		cache := ""
-		if size > 0 {
-			cache = filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), strconv.FormatUint(user, 10), strconv.Itoa(size))
-			if err := os.MkdirAll(cache, 0o700); err != nil {
-				return contract.Result{}, err
-			}
-			lock, err := processlock.Acquire(ctx, cache+".lock")
-			if err != nil {
-				return contract.Result{}, err
-			}
-			defer lock.Release()
-		}
-		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "apps", UserID: uint32(user), Size: size, IconCache: cache})
+		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "apps", IconCache: cache})
 		return contract.Success("android.apps", "Android 应用", data), err
 	})
-	s.mux.HandleFunc("GET /api/v1/android/icons/{user}/{size}/{key}", s.readAndroidIcon)
+	s.mux.HandleFunc("GET /api/v1/android/icons/{key}", s.readAndroidIcon)
 }
 
 func (s *Server) readAndroidIcon(w http.ResponseWriter, r *http.Request) {
-	user, err := strconv.ParseUint(r.PathValue("user"), 10, 32)
-	size, sizeErr := strconv.Atoi(r.PathValue("size"))
 	key := r.PathValue("key")
-	if _, queryErr := resourceQuery(r); queryErr != nil || err != nil || user > 21474 || sizeErr != nil || size < 16 || size != androidIconSize(size) || !androidIconKey.MatchString(key) {
+	if _, queryErr := resourceQuery(r); queryErr != nil || !androidIconKey.MatchString(key) {
 		s.fail(w, r.Context(), invalid("图标资源标识无效"))
 		return
 	}
-	file, err := os.Open(filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), strconv.FormatUint(user, 10), strconv.Itoa(size), key+".png"))
+	file, err := os.Open(filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), key+".png"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			err = &contract.Error{Code: "android.icon.not_found", Message: "图标缓存不存在，请刷新应用清单", HTTPStatus: http.StatusNotFound}
@@ -144,7 +98,7 @@ func (s *Server) provisionClient(ctx context.Context, r *http.Request) (contract
 	if err := ctx.Err(); err != nil {
 		return contract.Result{}, err
 	}
-	// 启动时的主动交付也遵守 HTTP 的时限，失败不能立即占用下一次进程启动。
+	// 私有 Provider 交付有界执行，失败不能立即占用下一次进程启动。
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	connection := s.config.Connection()
