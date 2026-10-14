@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	json "encoding/json/v2"
 	"io"
 	"net"
@@ -13,11 +14,36 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 )
+
+func TestUntrustedPortOwnerNeverReceivesBearer(t *testing.T) {
+	trusted := resourceFixture(t).config
+	other := resourceFixture(t).config
+	var requests atomic.Int32
+	impostor := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	var err error
+	impostor.TLS, err = other.ServerTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	impostor.StartTLS()
+	defer impostor.Close()
+	trusted.Listen = impostor.Listener.Addr().String()
+	if _, err := Probe(t.Context(), trusted); err == nil {
+		t.Fatal("接受了其他安装的服务身份")
+	}
+	if requests.Load() != 0 {
+		t.Fatal("证书校验前发送了认证请求")
+	}
+}
 
 func TestHTTPBoundaryRejectsUntrustedRequests(t *testing.T) {
 	server := resourceFixture(t)
@@ -57,7 +83,7 @@ func TestHTTPBoundaryRejectsUntrustedRequests(t *testing.T) {
 
 func TestUnauthorizedSlowBodyCannotHoldConnection(t *testing.T) {
 	server, cancel, done := serveFixture(t)
-	connection, err := net.Dial("tcp", server.config.Listen)
+	connection, err := tls.Dial("tcp", server.config.Listen, server.config.ClientTLS())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +119,12 @@ func TestHeadNeverEntersResourcesOrEvents(t *testing.T) {
 	for range cap(server.writeSlots) {
 		server.writeSlots <- struct{}{}
 	}
-	client := &http.Client{Timeout: time.Second}
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
 	defer client.CloseIdleConnections()
 	for _, test := range []struct{ path, allowed string }{
 		{"/api/v1/info", "GET"}, {"/api/v1/config?target=module", "GET, PUT"}, {"/api/v1/events", "GET"},
 	} {
-		request, err := http.NewRequestWithContext(t.Context(), http.MethodHead, "http://"+server.config.Listen+test.path, nil)
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodHead, server.config.Connection().Address+test.path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,14 +201,16 @@ func TestAcceptedWriteSurvivesDisconnectAndShutdownDrains(t *testing.T) {
 		return contract.Success("test.saved", "已保存", nil), nil
 	})
 	requestContext, cancelRequest := context.WithCancel(t.Context())
-	request, err := http.NewRequestWithContext(requestContext, "POST", "http://"+server.config.Listen+"/api/v1/test-write", nil)
+	request, err := http.NewRequestWithContext(requestContext, "POST", server.config.Connection().Address+"/api/v1/test-write", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
 	requestDone := make(chan error, 1)
 	go func() {
-		response, err := http.DefaultClient.Do(request)
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+		defer client.CloseIdleConnections()
+		response, err := client.Do(request)
 		if response != nil {
 			response.Body.Close()
 		}
@@ -268,12 +296,14 @@ func TestEventsSendSnapshotAndCloseWithServer(t *testing.T) {
 	server, cancel, done := serveFixture(t)
 	ctx, stop := context.WithTimeout(t.Context(), 3*time.Second)
 	defer stop()
-	request, err := http.NewRequestWithContext(ctx, "GET", "http://"+server.config.Listen+"/api/v1/events?topics=status", nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", server.config.Connection().Address+"/api/v1/events?topics=status", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
-	response, err := http.DefaultClient.Do(request)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

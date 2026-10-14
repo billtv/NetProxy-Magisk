@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -21,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/apiconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
@@ -34,19 +36,23 @@ const (
 )
 
 type Server struct {
-	options     moduleapp.Options
-	config      apiconfig.Config
-	mux         *http.ServeMux
-	instance    string
-	expensive   chan struct{}
-	writeSlots  chan struct{}
-	stopping    atomic.Bool
-	eventMu     sync.Mutex
-	events      *eventHub
-	admissionMu sync.Mutex
-	inFlight    sync.WaitGroup
-	lifetime    context.Context
-	stopEvents  context.CancelFunc
+	options        moduleapp.Options
+	config         apiconfig.Config
+	mux            *http.ServeMux
+	instance       string
+	expensive      chan struct{}
+	writeSlots     chan struct{}
+	stopping       atomic.Bool
+	eventMu        sync.Mutex
+	events         *eventHub
+	admissionMu    sync.Mutex
+	inFlight       sync.WaitGroup
+	lifetime       context.Context
+	stopEvents     context.CancelFunc
+	platform       platformQuerier
+	platformSlots  chan struct{}
+	provisionMu    sync.Mutex
+	provisionAfter time.Time
 }
 
 func New(options moduleapp.Options, config apiconfig.Config) (*Server, error) {
@@ -58,10 +64,12 @@ func New(options moduleapp.Options, config apiconfig.Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{options: options, config: config, mux: http.NewServeMux(),
-		instance: hex.EncodeToString(identity[:]), expensive: make(chan struct{}, 4), writeSlots: make(chan struct{}, 8)}
+		instance: hex.EncodeToString(identity[:]), expensive: make(chan struct{}, 4), writeSlots: make(chan struct{}, 8),
+		platform: androidplatform.Client{DEX: paths.New(options.ModuleDir).AndroidPlatformDEX()}, platformSlots: make(chan struct{}, 2)}
 	s.lifetime, s.stopEvents = context.WithCancel(context.Background())
 	s.route("GET /api/v1/info", 5*time.Second, false, s.info)
 	s.registerResources()
+	s.registerAndroid()
 	s.mux.HandleFunc("GET /api/v1/events", s.streamEvents)
 	s.mux.HandleFunc("GET /api/v1/diagnostics/export", s.exportDiagnostics)
 	s.mux.HandleFunc("/", s.unmatched)
@@ -95,9 +103,23 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) serveListener(ctx context.Context, listener net.Listener) error {
+	tlsConfig, err := s.config.ServerTLS()
+	if err != nil {
+		listener.Close()
+		return err
+	}
+	listener = tls.NewListener(listener, tlsConfig)
 	server := &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
+	if runtime.GOOS == "android" || runtime.GOOS == "linux" && platformPresent() {
+		s.inFlight.Add(1)
+		go func() {
+			defer s.inFlight.Done()
+			request, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.config.Connection().Address+"/api/v1/auth/provision", nil)
+			_, _ = s.provisionClient(ctx, request)
+		}()
+	}
 	var serveErr error
 	finished := false
 	select {
@@ -111,7 +133,7 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener) error
 	s.stopEvents()
 	drain, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxOperationTime+15*time.Second)
 	defer cancel()
-	err := server.Shutdown(drain)
+	err = server.Shutdown(drain)
 	if err != nil {
 		// 关闭连接不等于领域写入完成，PID 必须保留到所有处理器真正退出。
 		_ = server.Close()
@@ -146,7 +168,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if origin := r.Header.Get("Origin"); origin != "" {
 		parsed, err := url.Parse(origin)
-		if err != nil || parsed.Scheme != "http" || parsed.Host != s.config.Listen || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		if err != nil || parsed.Scheme != "https" || parsed.Host != s.config.Listen || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 			writeResult(w, http.StatusForbidden, contract.Result{Schema: 1, Code: "api.origin_invalid", Message: "此网页不能访问管理接口"})
 			return
 		}
@@ -165,7 +187,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	authorization := r.Header.Values("Authorization")
-	if len(authorization) != 1 || subtle.ConstantTimeCompare([]byte(authorization[0]), []byte("Bearer "+s.config.Secret)) != 1 {
+	provision := r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/provision"
+	if provision && (r.Header.Get("Origin") != "" || len(query) != 0 || len(authorization) != 0) {
+		writeResult(w, http.StatusForbidden, contract.Result{Schema: 1, Code: "api.provision_invalid", Message: "自动连接请求无效"})
+		return
+	}
+	if !provision && (len(authorization) != 1 || subtle.ConstantTimeCompare([]byte(authorization[0]), []byte("Bearer "+s.config.Secret)) != 1) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeResult(w, http.StatusUnauthorized, contract.Result{Schema: 1, Code: "api.unauthorized", Message: "需要有效的管理接口凭据"})
 		return
@@ -188,8 +215,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) route(pattern string, budget time.Duration, expensive bool, handler func(context.Context, *http.Request) (contract.Result, error)) {
+	s.registerRoute(pattern, budget, expensive, !strings.HasPrefix(pattern, "GET "), handler)
+}
+
+func (s *Server) registerRoute(pattern string, budget time.Duration, expensive, mutation bool, handler func(context.Context, *http.Request) (contract.Result, error)) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		mutation := r.Method != http.MethodGet
 		if mutation {
 			select {
 			case s.writeSlots <- struct{}{}:
@@ -223,7 +253,7 @@ func (s *Server) route(pattern string, budget time.Duration, expensive bool, han
 			s.fail(w, ctx, err)
 			return
 		}
-		if pattern != "GET /api/v1/info" {
+		if pattern != "GET /api/v1/info" && pattern != "POST /api/v1/auth/provision" && !strings.Contains(pattern, "/android/") {
 			moduleapp.RecordActivity(ctx, s.options, false)
 		}
 		writeResult(w, http.StatusOK, response)

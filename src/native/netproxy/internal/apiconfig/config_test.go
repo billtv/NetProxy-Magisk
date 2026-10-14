@@ -76,7 +76,35 @@ func TestListenOnlyAllowsLoopback(t *testing.T) {
 			t.Fatal(listen)
 		}
 	}
-	if err := (Config{Listen: "[::1]:9091", Secret: strings.Repeat("a", 64)}).Validate(); err != nil {
+	config, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "api.json"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	config.Listen = "[::1]:9091"
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTLSRejectsOtherInstallationAndLegacyIdentity(t *testing.T) {
+	first, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "api.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "api.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Connection().CertificateSHA256 == second.Connection().CertificateSHA256 {
+		t.Fatal("不同安装复用了 TLS 身份")
+	}
+	broken := first
+	broken.PrivateKey = second.PrivateKey
+	if broken.Validate() == nil {
+		t.Fatal("不匹配的证书和私钥被接受")
+	}
+	first.Certificate, first.PrivateKey = "", ""
+	if first.Validate() == nil {
+		t.Fatal("旧明文配置被接受")
 	}
 }

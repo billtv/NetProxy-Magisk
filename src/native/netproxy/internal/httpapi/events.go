@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
@@ -339,15 +338,11 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 			}
 		}
 		if topics&topicSubscriptions != 0 {
-			data, err := catalog.Scan(ctx, catalog.ScanOptions{Root: h.server.options.CatalogRoot, Type: "subscription", ProgressDir: h.server.options.ProgressDir})
+			groups, err := h.server.catalogSummaries(ctx, "subscription")
 			if err != nil {
 				response, _ := contract.Failure(ctx, err)
 				h.emit(topicSubscriptions, "subscriptions", response)
 			} else {
-				groups := make([]catalog.GroupSummary, 0, len(data))
-				for _, item := range data {
-					groups = append(groups, item.Group)
-				}
 				h.emit(topicSubscriptions, "subscriptions", contract.Success("subscription.list", "订阅状态", groups))
 			}
 		}
@@ -510,7 +505,9 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 				continue
 			}
 			if event.status != nil {
-				h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心实时状态", map[string]any{"available": true, "started_at_millis": identity, "status": *event.status}))
+				process, system, count := service.CPUUsage(int(saved.PID))
+				h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心实时状态", map[string]any{"available": true, "started_at_millis": identity, "status": *event.status,
+					"process_cpu_ticks": process, "system_cpu_ticks": system, "cpu_count": count}))
 			}
 			if event.groups != nil {
 				runtimeGroups = *event.groups

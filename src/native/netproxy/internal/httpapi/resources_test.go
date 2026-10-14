@@ -64,7 +64,11 @@ func resourceFixture(t testing.TB) *Server {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(options, apiconfig.Config{Listen: "127.0.0.1:9091", Secret: strings.Repeat("a", 64)})
+	config, err := apiconfig.Initialize(t.Context(), filepath.Join(root, "config", "api.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(options, config)
 	if err != nil {
 		t.Fatal(err)
 	}

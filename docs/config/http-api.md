@@ -6,6 +6,10 @@ sing-box Service API 位于 9090，负责核心运行时；模块 HTTP API 默�
 
 ## 连接
 
+官方 Android 管理器会自动连接，无需申请 Root 或复制凭据。以下命令用于开发者接入和独立 CLI 排查。
+
+如果主动修改了接口地址后又清除管理器数据，点击仪表盘的连接失败卡片，填写实际本机 HTTPS 地址即可重新连接，不需要填写凭据。
+
 在手机终端执行：
 
 ```sh
@@ -13,7 +17,9 @@ su -c '/data/adb/modules/netproxy/netproxyctl api status'
 su -c '/data/adb/modules/netproxy/netproxyctl api access'
 ```
 
-`api access` 的 `data.address` 是地址，`data.secret` 是私有凭据。请求通过 `Authorization: Bearer <secret>` 鉴权，不将凭据放入网址。
+`api access` 的 `data.address` 是 HTTPS 地址，`data.secret` 是私有凭据，`data.certificate_sha256` 是服务证书 SHA-256。客户端必须校验证书指纹，再通过 `Authorization: Bearer <secret>` 鉴权，不将凭据放入网址。
+
+`service` 与 `status` 事件中的 `core_started_at_millis` 是已验证核心身份；未确认时为 `0`。合并实时流量时须与 `traffic.started_at_millis` 一致，不能把旧核心的流量带到新实例。
 
 安装器会初始化 `config/api.json`。手动部署程序后，可执行：
 
@@ -30,14 +36,14 @@ su -c '/data/adb/modules/netproxy/netproxyctl api start'
 adb forward tcp:9091 tcp:9091
 ```
 
-随后请求电脑的 `http://127.0.0.1:9091/api/v1`。这只转发管理接口，不启用电脑本机透明代理。
+随后请求电脑的 `https://127.0.0.1:9091/api/v1`，仍需校验设备服务证书。这只转发管理接口，不启用电脑本机透明代理。
 
 ## 基础请求
 
-下面的 JavaScript 可用于同源客户端或非浏览器客户端，`secret` 来自刚才的 Root 读取。浏览器不允许无关网页跨域控制模块。
+下面展示请求格式，执行环境须事先建立服务证书信任；非浏览器客户端应固定校验已取得的指纹，而不是关闭证书验证。`secret` 来自刚才的 Root 读取。浏览器不允许无关网页跨域控制模块。
 
 ```js
-const base = 'http://127.0.0.1:9091/api/v1'
+const base = 'https://127.0.0.1:9091/api/v1'
 const secret = '<仅在本地使用的凭据>'
 
 async function request(path, method = 'GET', body) {
@@ -113,6 +119,9 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `POST /config/validate?target=...` | 仅校验候选，不保存 |
 | `GET /network/wifi-list` | 已保存的 Wi-Fi 名称 |
 | `GET /app-policy` | 当前应用策略；修改使用 `inbound/app` 配置目标 |
+| `GET /android/users` | Android 用户列表 |
+| `GET /android/apps?user_id=...` | 指定用户的应用、UID、名称与版本 |
+| `POST /android/apps/icons` | 同一用户最多 32 个应用的图标，正文为 `user_id/packages/size` |
 | `POST /diagnostics/ebpf` | 能力预检，正文含 `mode/raw` |
 | `GET /logs?kind=service&lines=200` | 脱敏日志，类型为 `service/core`，最多 2000 行 |
 | `DELETE /logs?kind=service` | 清空日志 |
@@ -123,12 +132,16 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 
 接口不接受手机的输入或输出文件路径。节点导入传文件内容；诊断导出直接下载，不能指定设备写入位置。
 
+`POST /auth/provision` 是唯一无 Bearer 的引导入口，只允许无 Origin 的空请求或空对象。它不会返回凭据，只会验证用户 0 中官方管理器的签名并向其私有接收组件交付连接资料；其他应用不能借此取得管理权限。
+
+应用名称和图标由模块按需运行的小型 Java 辅助程序调用 Android 框架生成，按 Android 用户分别查询；图标以 PNG 的 base64 内容返回，尺寸范围为 16–192 像素。辅助程序不常驻，也不依赖管理器进程。
+
 ## 实时订阅
 
 事件采用 SSE，使用带 Authorization 的 `fetch` 读取 `response.body`，不要为 EventSource 把 secret 加到 URL。
 
 - `status`：模块服务状态。
-- `traffic`：核心实时状态，属于 `status` 主题；`available=false` 表示核心不可用。
+- `traffic`：核心实时状态及 CPU 计数，属于 `status` 主题；`available=false` 表示核心不可用。
 - `groups`：节点快照与实际选择。
 - `subscriptions`：订阅状态与更新进度。
 

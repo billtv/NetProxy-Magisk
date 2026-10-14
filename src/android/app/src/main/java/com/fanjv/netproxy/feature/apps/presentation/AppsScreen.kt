@@ -35,6 +35,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -45,6 +49,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
@@ -52,6 +57,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.flowWithLifecycle
 import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
 import com.fanjv.netproxy.core.ui.component.BackIconButton
@@ -97,7 +105,6 @@ fun AppIcon(
     userId: String,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
     val iconSizePx = with(LocalDensity.current) { 40.dp.roundToPx() }
     val iconRevision = AppIconCache.revision
     var icon by remember(packageName, userId, iconSizePx) {
@@ -105,7 +112,7 @@ fun AppIcon(
     }
 
     LaunchedEffect(packageName, userId, iconSizePx, iconRevision) {
-        AppIconCache.loadIcon(context, packageName, userId, iconSizePx)?.let { icon = it }
+        AppIconCache.cachedIcon(packageName, userId, iconSizePx)?.let { icon = it }
     }
 
     Box(
@@ -147,7 +154,26 @@ internal fun AppsScreen(
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
 
-    LaunchedEffect(Unit) { viewModel.load() }
+    val iconSize = with(LocalDensity.current) { 40.dp.roundToPx() }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    for (currentList in listOf(listState, searchListState)) {
+        LaunchedEffect(currentList, iconSize, lifecycle) {
+            snapshotFlow {
+                val active = (currentList === listState) == searchStatus.isCollapsed()
+                (if (active) currentList.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String } else emptyList()) to AppIconCache.generation
+            }.flowWithLifecycle(lifecycle, Lifecycle.State.RESUMED)
+                .distinctUntilChanged().collectLatest { (visible, _) ->
+                    try { viewModel.loadIcons(visible, iconSize) }
+                    catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { }
+                }
+        }
+    }
+
+    val resources = LocalConfiguration.current
+    LaunchedEffect(resources.locales.toLanguageTags(), resources.densityDpi) {
+        viewModel.load(force = apps.hasLoadedApps)
+    }
     val commitOnLeave = rememberCommitOnLeave(viewModel::requestPolicyFlush)
     val leave: () -> Unit = { commitOnLeave { onBack?.invoke() } }
     BackHandler(enabled = onBack != null && searchStatus.isCollapsed() &&

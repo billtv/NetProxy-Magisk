@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/apiconfig"
@@ -20,12 +21,12 @@ func Probe(ctx context.Context, config apiconfig.Config) (map[string]any, error)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+config.Listen+"/api/v1/info", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, config.Connection().Address+"/api/v1/info", nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+config.Secret)
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, TLSClientConfig: config.ClientTLS()}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	response, err := client.Do(request)
 	if err != nil {
@@ -52,6 +53,26 @@ func Probe(ctx context.Context, config apiconfig.Config) (map[string]any, error)
 }
 
 func (s *Server) exportDiagnostics(w http.ResponseWriter, r *http.Request) {
+	query, err := resourceQuery(r, "manager_version", "manager_version_code")
+	if err != nil {
+		s.fail(w, r.Context(), err)
+		return
+	}
+	options := s.options
+	if value := query.Get("manager_version"); value != "" {
+		if len(value) > 64 || !diagnosticVersion.MatchString(value) {
+			s.fail(w, r.Context(), invalid("管理器版本无效"))
+			return
+		}
+		options.ManagerVersion = value
+	}
+	if value := query.Get("manager_version_code"); value != "" {
+		if len(value) > 20 || !diagnosticBuild.MatchString(value) {
+			s.fail(w, r.Context(), invalid("管理器版本号无效"))
+			return
+		}
+		options.ManagerVersionCode = value
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	select {
@@ -72,7 +93,7 @@ func (s *Server) exportDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(file.Name())
-	err = moduleapp.ExportDiagnostics(s.options, contextWriter{ctx: ctx, Writer: file})
+	err = moduleapp.ExportDiagnostics(options, contextWriter{ctx: ctx, Writer: file})
 	err = errors.Join(err, file.Sync(), file.Close())
 	if err != nil {
 		s.fail(w, r.Context(), err)
@@ -86,6 +107,9 @@ func (s *Server) exportDiagnostics(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Minute))
 	http.ServeFile(w, r, file.Name())
 }
+
+var diagnosticVersion = regexp.MustCompile(`^[A-Za-z0-9.+_-]+$`)
+var diagnosticBuild = regexp.MustCompile(`^[0-9]+$`)
 
 type contextWriter struct {
 	ctx context.Context
