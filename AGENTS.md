@@ -83,7 +83,8 @@ src/module/service.sh
 - HTTP 的 `HEAD` 不进入领域函数或 SSE。节点添加、编辑与导入直接传内容，共用 CLI 的领域事务，不落临时输入文件。SSE 文件事件按相关主题合并刷新，溢出必须重新校准快照；监听失效必须断开，不能保持连接却静默漏报。
 - HTTP 请求体统一上限 4 MiB，超限返回 `api.body_too_large` 与 413；API 监听失败或意外退出按 1–30 秒退避恢复，不需要重启核心。
 - 事件流的服务状态缓存每次发送仍核对当前文件身份与修改时间，不能只信内存 epoch；核心流按启动身份隔离。groups 更新在固定 250ms 窗口合并，实际模式消费原生 SubscribeClashMode，不能从节点分组猜测或遗漏模式变化。
-- Worker 关停只取消 HTTP 订阅的网络下载阶段；下载完成后的持久事务继续按原有有界上下文收尾，不能以缩短关停时间为由中断提交。图标缓存尺寸固定归入 48/96/144/192 档位；客户端使用返回的 icon_key，不自行拼原始请求尺寸。连接资料成功交付后冷却 30 秒，失败有界退避，拒绝请求不延长窗口。
+- Worker 关停只取消 HTTP 订阅的网络下载阶段；下载完成后的持久事务继续按原有有界上下文收尾，不能以缩短关停时间为由中断提交。Android Worker 默认使用 64 MiB 的 Go 软内存目标，显式 GOMEMLIMIT 优先；目标不包含文件映射或 Java 子进程，不在请求后强制 GC。
+- API 启动不主动交付凭据或拉起管理器；首次连接、凭据失效与显式重连由客户端请求固定签名私有交付。成功交付后冷却 30 秒，失败有界退避，拒绝请求不延长窗口。凭据缓存只在这些边界重读，Provider 原子写入必须立即更新同进程缓存；旧请求的 401 不得清除其他请求已经取得的新凭据，也不得重发已接受的写入。
 - 请求正文读取期限由 HTTP Server 管理，不在 handler 中为无正文 GET 设置连接读期限，否则长查询与 SSE 会在 15 秒被标准库取消；SSE 保留心跳、逐帧写入期限与真实断连错误。
 - 设备统计只从 Go 公共命令与真实核心启动采集 `module_active`、`service_start_result`，不增加 Android/WebUI SDK。Worker 以 Root 查询用户 0 的 `ANDROID_ID`，用固定 NetProxy 命名空间的 SHA-256 派生设备身份，每个 Worker 成功读取后只缓存在内存；读取失败不得回退随机身份。CLI 不查询设备标识，`config/telemetry/state.json` 只保存每日去重和有界队列，不进入编辑器、日志或诊断包；原始标识不得落盘或上传，Token 只由构建注入。损坏状态不得静默覆盖，系统查询和网络请求不得持有状态锁，上传不得阻塞业务命令。停服入口不得为统计重新启动 Worker，以免停服操作产生后台启动副作用。
 - 使用 reF1nd sing-box 的类型定义解析、生成和校验 Provider，不通过字符串替换拼接协议配置。
@@ -106,10 +107,10 @@ src/module/service.sh
 ## Android 管理器
 
 - 数据流保持 `Compose -> ViewModel -> Repository -> ModuleApiClient -> 模块 HTTPS API`。管理器不申请 Root，不执行 CLI，不直接读取 `/data/adb`、Catalog 文件或 PID。应用标签、图标与多用户由 Go 按需运行模块内 Java DEX 查询系统框架。
-- 普通 HTTP 读取、下载与图标查询随客户端取消；已接受写入有界收尾，不盲目重发。共享 SSE 按消费者合并主题，最后消费者退出后关闭；断线明确报错，重连重新等待完整快照，不使用轮询回退。首次自动连接只触发固定官方用户 0 的私有 Provider 交付，不通过 HTTP 返回秘密；Provider 校验 Binder UID 0，辅助程序校验当前 APK 签名、UID 与非导出 Provider，不接受请求指定目标。
+- 普通 HTTP 读取、下载与图标查询随客户端取消；已接受写入有界收尾，不盲目重发。共享 SSE 在前台会话内只增加主题，最后消费者退出后保留 2 秒切页宽限，真正停止后清空会话；断线明确报错，重连重新等待完整快照，不使用轮询回退。首次自动连接只触发固定官方用户 0 的私有 Provider 交付，不通过 HTTP 返回秘密；Provider 校验 Binder UID 0，辅助程序校验当前 APK 签名、UID 与非导出 Provider，不接受请求指定目标。
 - 订阅页列表与 SSE 的 `subscriptions` 快照包含本地和 URL 订阅分组，普通详情同样可读本地分组；URL 私有设置与订阅修改仍限制为 URL 订阅。框架 DEX 绘制应用原生图标直接读取 Android 资源；`loadIcon()` 的厂商主题扩展会在独立 `app_process` 读取系统 Provider 时被拒绝，造成整批图标消失。
-- 应用清单通过一次批量包查询准备版本化 PNG 缓存，图标以 `icon_key` 经鉴权 HTTPS 单独读取；滚动不得重新启动 DEX 或传输 Base64 图片 JSON。缓存位于 `data/cache/android-icons`，不进入诊断包；同用户、尺寸的生成与过期清理必须串行。刷新清单不得清空正在显示的图标，仅在新资源就绪后替换。
-- 管理器 SSE 使用不回连接池的独占连接，短请求成功只关闭响应流；请求失败或取消只断开自身一次。对已归还连接池的连接再次 disconnect，会中断随后复用它的请求，导致页面读取返回“操作已取消”。
+- 应用清单通过一次 DEX 查询全部用户并准备固定 128px 的版本化 PNG，图标以 `icon_key` 经鉴权 HTTPS 单独读取；滚动与显示密度变化不得重新启动 DEX 或传输 Base64。缓存位于 `data/cache/android-icons` 的平目录，不进入诊断包；Worker 平台查询串行，全部用户成功完成后再统一清理，不能按一个用户的名单删除其他用户的图标。刷新清单不得清空正在显示的图标，仅在新资源就绪后替换。
+- 管理器网络取消只取消本次 OkHttp Call，响应关闭后不得操作其他请求借用的池连接；SSE 使用独立 Call 与有界事件缓冲。类型化响应直接解码 Envelope，事件帧只缓存自身的解码结果；筛选事件按帧引用去重，不能为每个 traffic 帧重解完整 groups 或深比较 JSON 树。
 - ViewModel 按功能域持有不可变 `StateFlow`；Repository 负责命令组合和响应映射。不要重新堆回全能 Repository、全能 ViewModel 或静态 Service Locator。
 - 构造依赖由 `AppContainer` 和 `NetProxyViewModelFactory` 提供，不引入 Hilt/Koin，除非先完成明确的全项目架构决策。
 - 遵循现有 miuix 视觉和交互：二级页使用 `AdaptiveTopAppBar`，分组标题使用 miuix `SmallTitle`，列表保持 Lazy item 粒度，卡片优先复用 `groupedCardItems`。有 miuix 对应组件时不另造 Material 风格替代品。

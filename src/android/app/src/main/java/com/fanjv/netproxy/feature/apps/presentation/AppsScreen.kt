@@ -152,7 +152,6 @@ internal fun AppsScreen(
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
 
-    val iconSize = with(LocalDensity.current) { 40.dp.roundToPx().coerceIn(16, 192) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     for (currentList in listOf(listState, searchListState)) {
         LaunchedEffect(currentList, apps.masterAppList, lifecycle) {
@@ -169,8 +168,8 @@ internal fun AppsScreen(
     }
 
     val resources = LocalConfiguration.current
-    LaunchedEffect(resources.locales.toLanguageTags(), resources.densityDpi) {
-        viewModel.load(force = apps.hasLoadedApps, size = iconSize)
+    LaunchedEffect(resources.locales.toLanguageTags()) {
+        viewModel.load(force = apps.hasLoadedApps)
     }
     val commitOnLeave = rememberCommitOnLeave(viewModel::requestPolicyFlush)
     val leave: () -> Unit = { commitOnLeave { onBack?.invoke() } }

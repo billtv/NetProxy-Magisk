@@ -135,7 +135,9 @@ dependencies {
     implementation(libs.scripta.editor)
     implementation(libs.androidx.navigationevent.compose)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
     implementation(libs.hiddenapibypass)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
 }

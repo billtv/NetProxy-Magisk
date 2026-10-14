@@ -197,6 +197,36 @@ func serveFixture(t *testing.T) (*Server, context.CancelFunc, <-chan error) {
 	return server, cancel, done
 }
 
+func TestServerStartsWithoutInvokingAndroidPlatform(t *testing.T) {
+	server := resourceFixture(t)
+	var calls atomic.Int32
+	server.platform = platformFunc(func(context.Context, androidplatform.Request) (jsontext.Value, error) {
+		calls.Add(1)
+		return nil, nil
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.config.Listen = listener.Addr().String()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.serveListener(ctx, listener) }()
+	t.Cleanup(func() { cancel(); <-done })
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	request, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, server.config.Connection().Address+"/api/v1/info", nil)
+	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 200 || calls.Load() != 0 {
+		t.Fatal("API 启动或普通读取触发平台进程", response.StatusCode, calls.Load())
+	}
+}
+
 func TestAcceptedWriteSurvivesDisconnectAndShutdownDrains(t *testing.T) {
 	server, cancelServer, serverDone := serveFixture(t)
 	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan error, 1)
@@ -313,7 +343,7 @@ func TestAndroidAppReadCanExceedFifteenSeconds(t *testing.T) {
 	})
 	ctx, stop := context.WithTimeout(t.Context(), 20*time.Second)
 	defer stop()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.config.Connection().Address+"/api/v1/android/apps?user_id=0", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.config.Connection().Address+"/api/v1/android/apps", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

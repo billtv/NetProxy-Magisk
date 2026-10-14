@@ -51,12 +51,10 @@ internal class AppsViewModel(
     private var requestedConfig: AppProxyConfig? = null
     private val policyMutationMutex = Mutex()
     private var loaded = false
-    private var iconSize = 96
 
-    fun load(force: Boolean = false, size: Int = iconSize) {
+    fun load(force: Boolean = false) {
         if (_state.value.requiresPolicyReload) return
-        if (!force && size == iconSize && (loadJob?.isActive == true || loaded)) return
-        iconSize = size
+        if (!force && (loadJob?.isActive == true || loaded)) return
         val revision = ++loadRevision
         loadJob?.cancel()
         if (force) {
@@ -68,7 +66,7 @@ internal class AppsViewModel(
         loadJob = viewModelScope.launch {
             try {
                 if (force) packageCatalog.invalidatePackageListingCaches()
-                val users = coroutineScope {
+                val snapshot = coroutineScope {
                     val config = async {
                         policyMutationMutex.withLock {
                             if (draftConfig != null || _state.value.isSavingPolicy) return@withLock draftConfig ?: confirmedConfig
@@ -82,18 +80,17 @@ internal class AppsViewModel(
                             result
                         }
                     }
-                    val users = async { packageCatalog.getUsers() }
+                    val snapshot = async { packageCatalog.snapshot() }
                     config.await()
-                    users.await()
+                    snapshot.await()
                 }
-                val master = withContext(Dispatchers.IO) {
-                    users.map { user ->
-                        async {
-                            packageCatalog.getApplications(user.id, size).map { app ->
-                                AppInfoModel(app.packageName, app.label, user.id, app.system, app.iconKey)
-                            }
+                val master = withContext(Dispatchers.Default) {
+                    snapshot.users.flatMap { user ->
+                        user.apps.map { app ->
+                            currentCoroutineContext().ensureActive()
+                            AppInfoModel(app.packageName, app.label, user.id.toString(), app.system, app.iconKey)
                         }
-                    }.awaitAll().flatten()
+                    }
                 }
                 currentCoroutineContext().ensureActive()
                 if (revision != loadRevision) return@launch

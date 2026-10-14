@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -22,6 +23,9 @@ func RunProcess(ctx context.Context, options Options, logger *log.Logger) error 
 	if runtime.GOOS == "android" {
 		if err := prepareProcessEnvironment(); err != nil {
 			return err
+		}
+		if os.Getenv("GOMEMLIMIT") == "" {
+			debug.SetMemoryLimit(64 << 20)
 		}
 	}
 	if err := validateOptions(options); err != nil {

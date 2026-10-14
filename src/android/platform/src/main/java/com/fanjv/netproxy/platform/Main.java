@@ -42,6 +42,7 @@ public final class Main {
     public static final String MANAGER_CERTIFICATE_SHA256 = "723e324ffc0564c20f51557fde05287d3b8695fa84a53da60b69154fa8458813";
     private static final String AUTHORITY = MANAGER_PACKAGE + ".connection";
     private static final int INPUT_LIMIT = 64 * 1024;
+    private static final int ICON_SIZE = 128;
 
     public static void main(String[] args) {
         JSONObject response = new JSONObject();
@@ -59,14 +60,9 @@ public final class Main {
             Context context = (Context) threadClass.getMethod("getSystemContext").invoke(thread);
             String operation = request.getString("operation");
             Object result;
-            if ("users".equals(operation)) {
-                result = users(context);
-            } else if ("apps".equals(operation)) {
-                int user = request.getInt("user_id");
-                if (user < 0 || user > 21474) throw new IllegalArgumentException();
-                Context userContext = (Context) Context.class.getMethod("createContextAsUser", UserHandle.class, int.class)
-                    .invoke(context, UserHandle.getUserHandleForUid(user * 100000), 0);
-                result = apps(userContext, user, request);
+            if ("apps".equals(operation)) {
+                if (request.has("user_id") || request.has("size")) throw new IllegalArgumentException();
+                result = apps(context, new File(request.getString("icon_cache")));
             } else if ("provision".equals(operation)) {
                 result = provision(context, request.getJSONObject("connection"));
             } else {
@@ -95,19 +91,36 @@ public final class Main {
         return new String(output.toByteArray(), StandardCharsets.UTF_8);
     }
 
-    private static JSONArray users(Context context) throws Exception {
+    private static JSONObject apps(Context context, File cache) throws Exception {
         UserManager manager = context.getSystemService(UserManager.class);
         List<?> users = (List<?>) UserManager.class.getMethod("getUsers").invoke(manager);
         JSONArray result = new JSONArray();
-        for (Object user : users) {
-            Class<?> type = user.getClass();
-            result.put(new JSONObject().put("id", type.getField("id").getInt(user))
-                .put("name", (String) type.getField("name").get(user)));
+        Set<String> retained = ConcurrentHashMap.newKeySet();
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+            for (Object user : users) {
+                Class<?> type = user.getClass();
+                int id = type.getField("id").getInt(user);
+                if (id < 0 || id > 21474) throw new IllegalArgumentException();
+                Context userContext = (Context) Context.class.getMethod("createContextAsUser", UserHandle.class, int.class)
+                    .invoke(context, UserHandle.getUserHandleForUid(id * 100000), 0);
+                result.put(userApps(userContext, id, cache, retained, workers)
+                    .put("id", id).put("name", (String) type.getField("name").get(user)));
+            }
+        } finally {
+            workers.shutdownNow();
         }
-        return result;
+        // 全部用户查询成功后才清理，共用目录不能按单个用户的清单删除。
+        File[] files = cache.listFiles();
+        if (files != null) for (File file : files) {
+            String name = file.getName();
+            if ((name.matches("[a-f0-9]{64}\\.png") && !retained.contains(name)) || name.matches("[a-f0-9]{64}\\.png\\..+\\.tmp")) file.delete();
+        }
+        return new JSONObject().put("users", result);
     }
 
-    private static JSONObject apps(Context context, int user, JSONObject request) throws Exception {
+    private static JSONObject userApps(Context context, int user, File cache, Set<String> retained,
+        ExecutorService workers) throws Exception {
         PackageManager manager = context.getPackageManager();
         List<PackageInfo> applications = new ArrayList<>(manager.getInstalledPackages(0));
         Collections.sort(applications, new Comparator<PackageInfo>() {
@@ -115,47 +128,31 @@ public final class Main {
                 return first.packageName.compareTo(second.packageName);
             }
         });
-        int size = request.optInt("size", 0);
-        if (size != 0 && (size < 16 || size > 192)) throw new IllegalArgumentException();
-        File cache = size == 0 ? null : new File(request.getString("icon_cache"));
         String resources = context.getResources().getConfiguration().toString();
-        Set<String> retained = ConcurrentHashMap.newKeySet();
         JSONArray result = new JSONArray();
-        ExecutorService workers = Executors.newFixedThreadPool(4);
-        try {
-            List<Future<JSONObject>> entries = new ArrayList<>();
-            for (PackageInfo installed : applications) {
-                if (installed.applicationInfo != null) entries.add(workers.submit(() -> app(manager, installed, user, size, resources, cache, retained)));
-            }
-            for (Future<JSONObject> entry : entries) result.put(entry.get());
-        } finally {
-            workers.shutdownNow();
+        List<Future<JSONObject>> entries = new ArrayList<>();
+        for (PackageInfo installed : applications) {
+            if (installed.applicationInfo != null) entries.add(workers.submit(() -> app(manager, installed, user, resources, cache, retained)));
         }
-        if (cache != null) {
-            File[] files = cache.listFiles();
-            if (files != null) for (File file : files) {
-                String name = file.getName();
-                if ((name.matches("[a-f0-9]{64}\\.png") && !retained.contains(name)) || name.matches("[a-f0-9]{64}\\.png\\..+\\.tmp")) file.delete();
-            }
-        }
+        for (Future<JSONObject> entry : entries) result.put(entry.get());
         String revision = digest((result.toString() + resources).getBytes(StandardCharsets.UTF_8));
-        return new JSONObject().put("user_id", user).put("revision", revision).put("apps", result);
+        return new JSONObject().put("revision", revision).put("apps", result);
     }
 
-    private static JSONObject app(PackageManager manager, PackageInfo installed, int user, int size,
+    private static JSONObject app(PackageManager manager, PackageInfo installed, int user,
         String resources, File cache, Set<String> retained) throws Exception {
         ApplicationInfo info = installed.applicationInfo;
         long version = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
         String label = manager.getApplicationLabel(info).toString();
         String iconKey = "";
         if (cache != null) {
-            String name = digest((user + ":" + size + ":" + info.packageName + ":" + version + ":" + installed.lastUpdateTime + ":" + resources)
+            String name = digest((user + ":" + info.packageName + ":" + version + ":" + installed.lastUpdateTime + ":" + resources)
                 .getBytes(StandardCharsets.UTF_8)) + ".png";
             File target = new File(cache, name);
             try {
-                if (!target.isFile() || target.length() == 0) writeIcon(manager, info, size, target);
+                if (!target.isFile() || target.length() == 0) writeIcon(manager, info, ICON_SIZE, target);
                 retained.add(name);
-                iconKey = user + "/" + size + "/" + name.substring(0, 64);
+                iconKey = name.substring(0, 64);
             } catch (Exception unavailable) {
                 // 单个应用资源损坏或卸载不应阻止其他应用展示。
             }

@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,8 +16,8 @@ import (
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/processlock"
 )
 
 type platformFunc func(context.Context, androidplatform.Request) (jsontext.Value, error)
@@ -96,7 +95,7 @@ func TestProvisionCooldownBackoffAndRecovery(t *testing.T) {
 		return jsontext.Value(`{"delivered":true}`), nil
 	})
 	for _, delay := range []time.Duration{3, 6, 12, 24, 30, 30} {
-		// 模拟启动时无正文的主动交付，后续请求与它共享退避状态。
+		// 无正文的客户端交付请求与后续请求共享退避状态。
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/provision", nil)
 		if _, err := s.provisionClient(t.Context(), r); err == nil {
 			t.Fatal("交付失败被当作成功")
@@ -202,40 +201,40 @@ func TestAndroidAppsPreparePrivateCacheAndRemainCancellable(t *testing.T) {
 	calls := 0
 	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
 		calls++
-		if ctx != nil && ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if request.Operation != "apps" || request.UserID != 10 || request.Size != 96 || request.IconCache != filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "10", "96") {
+		if request.Operation != "apps" || request.IconCache != paths.New(s.options.ModuleDir).AndroidIcons() {
 			t.Fatal(request)
 		}
-		return jsontext.Value(`[]`), nil
+		info, err := os.Stat(request.IconCache)
+		if err != nil || !info.IsDir() {
+			t.Fatal("未准备图标缓存目录", err)
+		}
+		return jsontext.Value(`{"users":[{"id":0,"name":"Owner","revision":"owner","apps":[]},{"id":10,"name":"Work","revision":"work","apps":[]}]}`), nil
 	})
 	for range cap(s.writeSlots) {
 		s.writeSlots <- struct{}{}
 	}
-	for index, query := range []string{"user_id=10&size=96", "size=96", "user_id=10&size=999", "user_id=10&size=96&icon_cache=/secret", "user_id=21475&size=96"} {
-		r := httptest.NewRequest("GET", "/api/v1/android/apps?"+query, nil)
-		r.Host = s.config.Listen
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Authorization", "Bearer "+s.config.Secret)
-		w := httptest.NewRecorder()
-		s.ServeHTTP(w, r)
-		want := 400
-		if index == 0 {
-			want = 200
-		}
-		if w.Code != want {
-			t.Fatal(w.Code, w.Body.String())
+	w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"users"`) || !strings.Contains(w.Body.String(), `"Work"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, query := range []string{"user_id=0", "size=128", "user_id=10&size=96", "icon_cache=/secret", "size=96&size=128"} {
+		if w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps?"+query, ""); w.Code != 400 {
+			t.Fatal("旧参数未拒绝", query, w.Code, w.Body.String())
 		}
 	}
+	if w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/users", ""); w.Code != 404 {
+		t.Fatal("旧用户端点仍然可用", w.Code)
+	}
 	if calls != 1 {
-		t.Fatal(calls)
+		t.Fatal("无效请求进入平台查询", calls)
 	}
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := s.queryPlatform(cancelled, androidplatform.Request{Operation: "apps"})
-	if err == nil {
-		t.Fatal("平台查询吞掉取消")
+	if _, err := s.queryPlatform(cancelled, androidplatform.Request{Operation: "apps"}); !errors.Is(err, context.Canceled) {
+		t.Fatal("平台查询吞掉取消", err)
 	}
 	connection, err := json.Marshal(s.config.Connection())
 	if err != nil || strings.Contains(string(connection), "private_key") || strings.Contains(string(connection), "PRIVATE KEY") {
@@ -243,102 +242,73 @@ func TestAndroidAppsPreparePrivateCacheAndRemainCancellable(t *testing.T) {
 	}
 }
 
-func TestAndroidAppsUseOnlyFourIconSizeBuckets(t *testing.T) {
+func TestAndroidAppsPlatformFailureIsNotAnEmptySnapshot(t *testing.T) {
 	s := resourceFixture(t)
-	wantSize := 0
-	calls := 0
-	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
-		calls++
-		wantCache := ""
-		if wantSize != 0 {
-			wantCache = filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "10", strconv.Itoa(wantSize))
-		}
-		if request.Operation != "apps" || request.UserID != 10 || request.Size != wantSize || request.IconCache != wantCache {
-			t.Fatalf("分档请求: %+v, 期望尺寸: %d", request, wantSize)
-		}
-		return jsontext.Value(`{"user_id":10,"revision":"fixture","apps":[]}`), nil
+	s.platform = platformFunc(func(context.Context, androidplatform.Request) (jsontext.Value, error) {
+		return nil, &contract.Error{Code: "android.query_failed", Message: "fixture"}
 	})
-	if w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps?user_id=10", ""); w.Code != 200 {
-		t.Fatal("不请求图标的清单失败", w.Code)
-	}
-	if _, err := os.Stat(paths.New(s.options.ModuleDir).AndroidIcons()); !os.IsNotExist(err) {
-		t.Fatal("无尺寸请求创建了图标目录", err)
-	}
-	for size := 16; size <= 192; size++ {
-		switch {
-		case size <= 48:
-			wantSize = 48
-		case size <= 96:
-			wantSize = 96
-		case size <= 144:
-			wantSize = 144
-		default:
-			wantSize = 192
-		}
-		w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps?user_id=10&size="+strconv.Itoa(size), "")
-		if w.Code != 200 {
-			t.Fatalf("尺寸 %d: %d %s", size, w.Code, w.Body.String())
-		}
-	}
-	for _, query := range []string{
-		"user_id=10&size=0", "user_id=10&size=15", "user_id=10&size=193", "user_id=10&size=-48",
-		"user_id=10&size=", "user_id=10&size=48.0", "user_id=10&size=../../48",
-		"user_id=10&size=9999999999999999999999999999999999999", "user_id=10&size=48&size=96",
-		"user_id=-1&size=48", "user_id=21475&size=48", "user_id=10&size=48&icon_cache=/secret",
-	} {
-		if w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps?"+query, ""); w.Code != 400 {
-			t.Fatal("恶意参数未拒绝", query, w.Code)
-		}
-	}
-	if calls != 178 {
-		t.Fatal("无效请求进入平台或有效请求丢失", calls)
-	}
-	entries, err := os.ReadDir(filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "10"))
-	if err != nil || len(entries) != 8 {
-		t.Fatal("没有收敛为四个目录与四个锁", len(entries), err)
-	}
-	for _, entry := range entries {
-		name := strings.TrimSuffix(entry.Name(), ".lock")
-		if name != "48" && name != "96" && name != "144" && name != "192" {
-			t.Fatal("创建了非档位目录或锁", entry.Name())
-		}
+	w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps", "")
+	if w.Code == 200 || !strings.Contains(w.Body.String(), "android.query_failed") {
+		t.Fatal("平台失败被转换为空清单", w.Code, w.Body.String())
 	}
 }
 
-func TestAndroidAppsSameBucketSharesCancellableCacheLock(t *testing.T) {
+func TestAndroidAppsWaitingForPlatformRemainsCancellable(t *testing.T) {
 	s := resourceFixture(t)
-	cache := filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "10", "48")
-	lock, err := processlock.Acquire(t.Context(), cache+".lock")
-	if err != nil {
-		t.Fatal(err)
+	for range cap(s.platformSlots) {
+		s.platformSlots <- struct{}{}
 	}
-	defer lock.Release()
 	s.platform = platformFunc(func(context.Context, androidplatform.Request) (jsontext.Value, error) {
-		t.Error("同档位没有复用已持有的缓存锁")
-		return jsontext.Value(`[]`), nil
+		t.Error("取消后启动了平台进程")
+		return nil, nil
 	})
-	for _, size := range []string{"16", "47", "48"} {
-		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-		r := httptest.NewRequest(http.MethodGet, "/api/v1/android/apps?user_id=10&size="+size, nil).WithContext(ctx)
-		r.Host = s.config.Listen
-		r.Header.Set("Authorization", "Bearer "+s.config.Secret)
-		w := httptest.NewRecorder()
-		s.ServeHTTP(w, r)
-		cancel()
-		if w.Code != 504 {
-			t.Fatal("等待缓存锁没有遵循取消", size, w.Code, w.Body.String())
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/android/apps", nil).WithContext(ctx)
+	r.Host = s.config.Listen
+	r.Header.Set("Authorization", "Bearer "+s.config.Secret)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 504 {
+		t.Fatal("等待平台查询没有遵循取消", w.Code, w.Body.String())
+	}
+}
+
+func TestAndroidPlatformQueriesShareOneWriter(t *testing.T) {
+	s := resourceFixture(t)
+	var active atomic.Int32
+	var calls atomic.Int32
+	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
+		if active.Add(1) != 1 {
+			t.Error("图标生成与清理发生并行写入")
 		}
+		defer active.Add(-1)
+		calls.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		return jsontext.Value(`{"users":[]}`), nil
+	})
+	var parallel sync.WaitGroup
+	for range 8 {
+		parallel.Go(func() {
+			if _, err := s.queryPlatform(t.Context(), androidplatform.Request{Operation: "apps"}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	parallel.Wait()
+	if calls.Load() != 8 {
+		t.Fatal("平台查询丢失", calls.Load())
 	}
 }
 
 func TestAndroidIconReadsCachedFileWithoutPlatformAndSupportsETag(t *testing.T) {
 	s := resourceFixture(t)
-	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
+	s.platform = platformFunc(func(context.Context, androidplatform.Request) (jsontext.Value, error) {
 		t.Fatal("缓存读取不应启动 Android 进程")
 		return nil, nil
 	})
 	key := strings.Repeat("a", 64)
-	cache := filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "0", "96")
+	cache := paths.New(s.options.ModuleDir).AndroidIcons()
 	if err := os.MkdirAll(cache, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -350,20 +320,15 @@ func TestAndroidIconReadsCachedFileWithoutPlatformAndSupportsETag(t *testing.T) 
 		path, method, token, etag string
 		status                    int
 	}{
-		{"/api/v1/android/icons/0/96/" + key, "GET", s.config.Secret, "", 200},
-		{"/api/v1/android/icons/0/96/" + key, "GET", s.config.Secret, `"` + key + `"`, 304},
-		{"/api/v1/android/icons/0/96/" + key, "HEAD", s.config.Secret, "", 405},
-		{"/api/v1/android/icons/0/96/" + key, "GET", "wrong", "", 401},
-		{"/api/v1/android/icons/0/96/" + strings.Repeat("b", 64), "GET", s.config.Secret, "", 404},
-		{"/api/v1/android/icons/0/999/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/16/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/140/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/193/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/-48/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/21475/96/" + key, "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/96/..%2Fsecret", "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/96/" + strings.Repeat("A", 64), "GET", s.config.Secret, "", 400},
-		{"/api/v1/android/icons/0/96/" + key + "?file=secret", "GET", s.config.Secret, "", 400},
+		{"/api/v1/android/icons/" + key, "GET", s.config.Secret, "", 200},
+		{"/api/v1/android/icons/" + key, "GET", s.config.Secret, `"` + key + `"`, 304},
+		{"/api/v1/android/icons/" + key, "HEAD", s.config.Secret, "", 405},
+		{"/api/v1/android/icons/" + key, "GET", "wrong", "", 401},
+		{"/api/v1/android/icons/" + strings.Repeat("b", 64), "GET", s.config.Secret, "", 404},
+		{"/api/v1/android/icons/0/96/" + key, "GET", s.config.Secret, "", 404},
+		{"/api/v1/android/icons/..%2Fsecret", "GET", s.config.Secret, "", 400},
+		{"/api/v1/android/icons/" + strings.Repeat("A", 64), "GET", s.config.Secret, "", 400},
+		{"/api/v1/android/icons/" + key + "?file=secret", "GET", s.config.Secret, "", 400},
 		{"/api/v1/android/apps/icons", "POST", s.config.Secret, "", 404},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
@@ -375,67 +340,46 @@ func TestAndroidIconReadsCachedFileWithoutPlatformAndSupportsETag(t *testing.T) 
 		if w.Code != tc.status {
 			t.Fatalf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body.String())
 		}
-		if tc.status == 200 && (w.Body.String() != png || w.Header().Get("Content-Type") != "image/png") {
-			t.Fatal("图标未按二进制返回")
+		if tc.status == 200 && (w.Body.String() != png || w.Header().Get("Content-Type") != "image/png" ||
+			w.Header().Get("Cache-Control") != "private, max-age=604800, immutable" || w.Header().Get("ETag") != `"`+key+`"`) {
+			t.Fatal("图标未按私有二进制资源返回", w.Header())
 		}
 	}
 }
 
-func TestAndroidIconReadsAllBucketsButNeverOldSizeDirectories(t *testing.T) {
+func TestAndroidAppsIconKeyCanBeReadUnchanged(t *testing.T) {
 	s := resourceFixture(t)
-	s.platform = platformFunc(func(context.Context, androidplatform.Request) (jsontext.Value, error) {
-		t.Fatal("读取图标启动平台进程")
-		return nil, nil
-	})
 	key := strings.Repeat("a", 64)
-	for _, size := range []int{48, 96, 140, 144, 192} {
-		cache := filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), "10", strconv.Itoa(size))
-		if err := os.MkdirAll(cache, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cache, key+".png"), []byte("fixture"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/icons/10/"+strconv.Itoa(size)+"/"+key, "")
-		want := 200
-		if size == 140 {
-			want = 400
-		}
-		if w.Code != want {
-			t.Fatal("图标读取使用了非档位或遗漏有效档位", size, w.Code)
-		}
-	}
-}
-
-func TestAndroidAppsBucketIconKeyCanBeReadUnchanged(t *testing.T) {
-	s := resourceFixture(t)
-	key := "10/144/" + strings.Repeat("a", 64)
 	png := "\x89PNG\r\n\x1a\nfixture"
 	s.platform = platformFunc(func(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {
-		if request.Operation != "apps" || request.Size != 144 || request.UserID != 10 {
-			t.Fatal("图标请求没有分档", request)
+		if request.Operation != "apps" || request.IconCache != paths.New(s.options.ModuleDir).AndroidIcons() {
+			t.Fatal(request)
 		}
-		if err := os.WriteFile(filepath.Join(request.IconCache, strings.Repeat("a", 64)+".png"), []byte(png), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(request.IconCache, key+".png"), []byte(png), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		return json.Marshal(map[string]any{"apps": []map[string]string{{"icon_key": key}}}, json.Deterministic(true))
+		return json.Marshal(map[string]any{"users": []map[string]any{
+			{"id": 10, "name": "Work", "revision": "fixture", "apps": []map[string]string{{"icon_key": key}}},
+		}}, json.Deterministic(true))
 	})
-	w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps?user_id=10&size=140", "")
+	w := androidResourceRequest(s, http.MethodGet, "/api/v1/android/apps", "")
 	var listing struct {
 		Data struct {
-			Apps []struct {
-				IconKey string `json:"icon_key"`
-			} `json:"apps"`
+			Users []struct {
+				Apps []struct {
+					IconKey string `json:"icon_key"`
+				} `json:"apps"`
+			} `json:"users"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil || w.Code != 200 || len(listing.Data.Apps) != 1 {
+	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil || w.Code != 200 || len(listing.Data.Users) != 1 || len(listing.Data.Users[0].Apps) != 1 {
 		t.Fatal("应用清单无效", w.Code, err)
 	}
-	if listing.Data.Apps[0].IconKey != key {
-		t.Fatal("服务端改写了 opaque key")
+	if listing.Data.Users[0].Apps[0].IconKey != key {
+		t.Fatal("服务端改写了图标键")
 	}
-	w = androidResourceRequest(s, http.MethodGet, "/api/v1/android/icons/"+listing.Data.Apps[0].IconKey, "")
+	w = androidResourceRequest(s, http.MethodGet, "/api/v1/android/icons/"+listing.Data.Users[0].Apps[0].IconKey, "")
 	if w.Code != 200 || w.Body.String() != png {
-		t.Fatal("opaque key 不能直接读取图标", w.Code)
+		t.Fatal("图标键不能直接读取图标", w.Code)
 	}
 }

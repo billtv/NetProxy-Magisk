@@ -4,6 +4,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.io.InputStream
+
+internal data class ModuleHttpResponse(val status: Int, val content: String)
 
 internal data class ApiTestRequest(val method: String, val path: String, val body: JsonObject, val query: Map<String, String>, val mutation: Boolean) {
     val target: String get() = query.getValue("target")
@@ -18,8 +21,11 @@ internal data class ApiTestRequest(val method: String, val path: String, val bod
 
 internal abstract class TestApiTransport : ModuleApiTransport {
     override suspend fun reconnect(address: String): Unit = error("Unexpected reconnect")
-    final override suspend fun request(method: String, path: String, body: JsonObject?, query: Map<String, String>, mutation: Boolean) =
-        respond(ApiTestRequest(method, path, body ?: JsonObject(emptyMap()), query, mutation))
+    final override suspend fun <T> request(method: String, path: String, body: JsonObject?, query: Map<String, String>, mutation: Boolean,
+        decode: (Int, InputStream) -> T): T {
+        val response = respond(ApiTestRequest(method, path, body ?: JsonObject(emptyMap()), query, mutation))
+        return response.content.byteInputStream().use { decode(response.status, it) }
+    }
     abstract suspend fun respond(request: ApiTestRequest): ModuleHttpResponse
     override suspend fun download(path: String, query: Map<String, String>, destination: File): Unit = error("Unexpected download")
     override suspend fun image(path: String): ByteArray = error("Unexpected image")
