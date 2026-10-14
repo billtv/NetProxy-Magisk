@@ -228,18 +228,29 @@ func TestResourcesEBPFDiagnosticRequiresKnownMode(t *testing.T) {
 	}
 }
 
-func TestResourcesImportUsesLargerBoundWithoutRelaxingOtherBodies(t *testing.T) {
+func TestResourcesImportSharesBoundedRequestSize(t *testing.T) {
 	server := resourceFixture(t)
-	content := "socks://127.0.0.1:1085#LARGE_IMPORT\n# " + strings.Repeat("x", 8<<20)
-	body := resourceJSON(t, map[string]string{"content": content})
-	response, result := resourceRequest(t, server, "POST", "/api/v1/nodes", body)
-	if response.Code != http.StatusBadRequest || result.Code != "usage.invalid" {
-		t.Fatalf("普通节点请求超过 8MiB 仍被接受: %s", response.Body.String())
+	content := "socks://127.0.0.1:1085#ANONYMOUS_IMPORT"
+	resourceAssertSuccess(t, server, "POST", "/api/v1/nodes/import", resourceJSON(t, map[string]string{"content": content}), "node.imported", nil)
+	body := resourceJSON(t, map[string]string{"content": strings.Repeat("x", bodyLimit)})
+	for _, path := range []string{"/api/v1/nodes", "/api/v1/nodes/import"} {
+		response, result := resourceRequest(t, server, "POST", path, body)
+		if response.Code != http.StatusRequestEntityTooLarge || result.Code != "api.body_too_large" {
+			t.Fatalf("超大正文未被统一拒绝: %s", response.Body.String())
+		}
 	}
-	resourceAssertSuccess(t, server, "POST", "/api/v1/nodes/import", body, "node.imported", nil)
-	response, result = resourceRequest(t, server, "POST", "/api/v1/nodes/import", resourceJSON(t, map[string]string{"content": strings.Repeat("x", resourceImportLimit)}))
-	if response.Code != http.StatusBadRequest || result.Code != "usage.invalid" {
-		t.Fatalf("导入超过 32MiB 仍被接受: %s", response.Body.String())
+}
+
+func TestSubscriptionValidationUsesUnprocessableStatus(t *testing.T) {
+	server := resourceFixture(t)
+	for _, test := range []struct{ method, path, body, code string }{
+		{"PUT", "/api/v1/subscriptions/default", `{"name":"anonymous"}`, "subscription.read_only"},
+		{"POST", "/api/v1/subscriptions", `{"url":"https://example.test/sub","update_interval":1}`, "subscription.interval_too_short"},
+	} {
+		response, result := resourceRequest(t, server, test.method, test.path, test.body)
+		if response.Code != http.StatusUnprocessableEntity || result.Code != test.code {
+			t.Fatal("订阅校验错误被误报为内部错误", response.Code, result.Code)
+		}
 	}
 }
 

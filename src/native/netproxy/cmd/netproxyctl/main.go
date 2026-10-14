@@ -97,7 +97,9 @@ func (c *cli) run(ctx context.Context, args []string) int {
 }
 
 func skipActivity(args []string) bool {
-	if len(args) > 1 && args[0] == "api" && args[1] != "start" { return true }
+	if len(args) > 1 && args[0] == "api" && args[1] != "start" {
+		return true
+	}
 	for _, arg := range args {
 		if arg == "help" || arg == "-h" || arg == "--help" {
 			return true

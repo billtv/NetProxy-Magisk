@@ -109,26 +109,50 @@ func runWorker(ctx context.Context, args []string) error {
 }
 
 func runAPIServer(ctx context.Context, path string, options moduleapp.Options, wake <-chan struct{}, report func(error)) error {
+	return runAPIHost(ctx, path, wake, report, func(ctx context.Context, config apiconfig.Config) error {
+		server, err := httpapi.New(options, config)
+		if err != nil {
+			return err
+		}
+		return server.Serve(ctx)
+	})
+}
+
+func runAPIHost(ctx context.Context, path string, wake <-chan struct{}, report func(error), serve func(context.Context, apiconfig.Config) error) error {
+	const maxRetry = 30 * time.Second
 	var active apiconfig.Config
 	var cancel context.CancelFunc
 	var done chan error
-	start := func() {
-		config, err := apiconfig.Load(path)
-		if err != nil {
+	var started time.Time
+	var lastError string
+	delay := time.Second
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	var retry <-chan time.Time = timer.C
+	failed := func(err error) {
+		if err.Error() != lastError {
 			report(err)
-			return
+			lastError = err.Error()
 		}
-		server, err := httpapi.New(options, config)
-		if err != nil {
-			report(err)
-			return
-		}
-		serverContext, stop := context.WithCancel(ctx)
-		active, cancel, done = config, stop, make(chan error, 1)
-		finished := done
-		go func() { finished <- server.Serve(serverContext) }()
+		timer.Reset(delay)
+		retry = timer.C
+		delay = min(delay*2, maxRetry)
 	}
-	start()
+	exited := func(err error) {
+		cancel()
+		cancel, done = nil, nil
+		if ctx.Err() != nil {
+			return
+		}
+		// 启动 goroutine 不代表监听成功，短暂退出不能重置退避。
+		if time.Since(started) >= maxRetry {
+			delay, lastError = time.Second, ""
+		}
+		if err == nil {
+			err = errors.New("模块管理接口意外退出")
+		}
+		failed(err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -138,31 +162,63 @@ func runAPIServer(ctx context.Context, path string, options moduleapp.Options, w
 			}
 			return nil
 		case err := <-done:
-			cancel()
-			cancel, done = nil, nil
-			if err != nil {
-				report(err)
+			exited(err)
+			if ctx.Err() != nil {
+				return err
 			}
-		case <-wake:
-			config, err := apiconfig.Load(path)
-			if err != nil {
-				report(err)
+			continue
+		case _, ok := <-wake:
+			if !ok {
+				wake = nil
 				continue
 			}
-			if cancel != nil && config == active {
-				continue
-			}
-			if cancel != nil {
-				cancel()
-				if err := <-done; err != nil {
-					report(err)
-				}
-				cancel, done = nil, nil
-			}
-			if err := ctx.Err(); err == nil {
-				start()
-			}
+		case <-retry:
 		}
+		timer.Stop()
+		retry = nil
+		if ctx.Err() != nil {
+			continue
+		}
+		config, err := apiconfig.Load(path)
+		if err != nil {
+			failed(err)
+			continue
+		}
+		// wake 与退出可同时就绪，已结束的实例不能被误判为相同配置仍在运行。
+		select {
+		case err := <-done:
+			exited(err)
+			if ctx.Err() != nil {
+				return err
+			}
+			timer.Stop()
+			retry = nil
+		default:
+		}
+		if cancel != nil && config == active {
+			delay, lastError = time.Second, ""
+			continue
+		}
+		if cancel != nil {
+			cancel()
+			// 先等待旧实例及已接受写入收尾，不把主动关停错误当作重启失败。
+			err := <-done
+			cancel, done = nil, nil
+			if ctx.Err() != nil {
+				return err
+			}
+			if err != nil {
+				report(err)
+			}
+			delay, lastError = time.Second, ""
+		}
+		if ctx.Err() != nil {
+			continue
+		}
+		serverContext, stop := context.WithCancel(ctx)
+		active, cancel, done, started = config, stop, make(chan error, 1), time.Now()
+		finished := done
+		go func() { finished <- serve(serverContext, config) }()
 	}
 }
 

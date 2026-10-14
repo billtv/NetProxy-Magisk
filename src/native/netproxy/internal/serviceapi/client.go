@@ -22,6 +22,7 @@ const (
 	methodGetStartedAt        = "/daemon.StartedService/GetStartedAt"
 	methodSubscribeStatus     = "/daemon.StartedService/SubscribeStatus"
 	methodGetClashModeStatus  = "/daemon.StartedService/GetClashModeStatus"
+	methodSubscribeClashMode  = "/daemon.StartedService/SubscribeClashMode"
 	methodSetClashMode        = "/daemon.StartedService/SetClashMode"
 	methodSelectOutbound      = "/daemon.StartedService/SelectOutbound"
 	methodURLTest             = "/daemon.StartedService/URLTest"
@@ -230,6 +231,29 @@ func (c *Client) Mode(ctx context.Context) (Mode, error) {
 		return Mode{}, err
 	}
 	return Mode(response), nil
+}
+
+// SubscribeClashMode 消费原生模式变更流，与状态流共用取消、背压和帧校验。
+func (c *Client) SubscribeClashMode(ctx context.Context, consume func(string) error) error {
+	if consume == nil {
+		return errors.New("Service API clash mode consumer is nil")
+	}
+	return c.subscribe(ctx, methodSubscribeClashMode, &emptyMessage{}, func(content []byte) error {
+		var mode string
+		// ClashMode 的 mode 是字段 3，不是 ClashModeStatus 的 current_mode 字段 2。
+		err := consumeFields(content, func(number protowire.Number, wireType protowire.Type, field []byte) (int, error) {
+			if number != 3 {
+				return 0, nil
+			}
+			value, length, err := consumeString(field, wireType)
+			mode = value
+			return length, err
+		})
+		if err != nil {
+			return err
+		}
+		return consume(mode)
+	})
 }
 
 func (c *Client) SetMode(ctx context.Context, mode string) error {

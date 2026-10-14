@@ -7,19 +7,24 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/subscription"
 )
 
 func TestUntrustedPortOwnerNeverReceivesBearer(t *testing.T) {
@@ -290,6 +295,172 @@ func TestDiagnosticDownloadIsCompleteAndOmitsCredentials(t *testing.T) {
 		if strings.Contains(header.Name, "api.json") || bytes.Contains(content, []byte(server.config.Secret)) {
 			t.Fatal("诊断包包含管理凭据")
 		}
+	}
+}
+
+func TestAndroidAppReadCanExceedFifteenSeconds(t *testing.T) {
+	server, cancel, done := serveFixture(t)
+	t.Cleanup(func() { cancel(); <-done })
+	server.platform = platformFunc(func(ctx context.Context, _ androidplatform.Request) (jsontext.Value, error) {
+		timer := time.NewTimer(16 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return jsontext.Value(`{"apps":[]}`), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	ctx, stop := context.WithTimeout(t.Context(), 20*time.Second)
+	defer stop()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.config.Connection().Address+"/api/v1/android/apps?user_id=0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("应用查询被普通读取期限中断", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		content, _ := io.ReadAll(response.Body)
+		t.Fatal(response.Status, string(content))
+	}
+}
+
+func TestShutdownCancelsSubscriptionTransferButPreservesProvider(t *testing.T) {
+	started := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	server, stopServer, done := serveFixture(t)
+	defer stopServer()
+	resourceSubscriptionFixture(t, server, "slow-subscription", upstream.URL)
+	provider := paths.New(server.options.ModuleDir).Catalog()
+	provider = filepath.Join(provider, "slow-subscription", "provider.json")
+	before, err := os.ReadFile(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.config.Connection().Address+"/api/v1/subscriptions/slow-subscription/update", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+server.config.Secret)
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: server.config.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	finished := make(chan error, 1)
+	go func() {
+		response, err := client.Do(request)
+		if response != nil {
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+		}
+		finished <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("订阅下载没有启动")
+	}
+	stopServer()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("停服被慢订阅下载阻塞")
+	}
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(provider)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("取消网络传输破坏了原 Provider", err)
+	}
+}
+
+func TestRequestBodyLimitHandlesKnownAndUnknownLengths(t *testing.T) {
+	for _, test := range []struct {
+		content string
+		length  int64
+		status  int
+	}{
+		{`{"value":"ok"}`, 14, 0},
+		{`{"value":"ok"}`, -1, 0},
+		{`{"value":"ok"}`, 15, http.StatusRequestEntityTooLarge},
+		{`{"value":"long"}`, -1, http.StatusRequestEntityTooLarge},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.content))
+		request.Header.Set("Content-Type", "application/json")
+		request.ContentLength = test.length
+		var input struct {
+			Value string `json:"value"`
+		}
+		err := decodeRequestLimit(request, &input, 14)
+		if test.status == 0 {
+			if err != nil || input.Value != "ok" {
+				t.Fatal(input, err)
+			}
+		} else if err == nil || failureStatus("api.body_too_large", err) != test.status {
+			t.Fatal("超大正文未返回明确 HTTP 状态", err)
+		}
+	}
+}
+
+func TestHTTPStatusIsExplicitAndDoesNotChangeCLIExitStatus(t *testing.T) {
+	for _, test := range []struct {
+		code   string
+		status int
+	}{
+		{"subscription.read_only", 422}, {"subscription.interval_too_short", 422},
+		{"subscription.invalid_target", 422}, {"subscription.busy", 409}, {"subscription.cancelled", 408},
+		{"node.runtime_sync_failed", 502}, {"node.persisted_effect_failed", 500},
+		{"node.delay_busy", 409}, {"node.delay_timeout", 504},
+		{"unregistered.invalid", 500}, {"unregistered.not_found", 500},
+	} {
+		err := &subscription.Error{Code: test.code, Message: "匿名错误"}
+		if actual := failureStatus(test.code, err); actual != test.status {
+			t.Errorf("%s: %d", test.code, actual)
+		}
+	}
+	err := &contract.Error{Status: 2, HTTPStatus: 422, Code: "fixture", Message: "匿名错误"}
+	_, exit := contract.Failure(t.Context(), err)
+	if exit != 2 || failureStatus(err.Code, err) != 422 {
+		t.Fatal("混用了 HTTP 状态与 CLI 退出码", exit)
+	}
+}
+
+func TestInfoCachesVersionAndPreservesMemoryFields(t *testing.T) {
+	fixture := resourceFixture(t)
+	file := paths.New(fixture.options.ModuleDir).ModuleProp()
+	resourceWriteFile(t, file, "version=v8.5.3\nversionCode=1084\n")
+	server, err := New(fixture.options, fixture.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.stopEvents()
+	resourceWriteFile(t, file, "version=changed\nversionCode=0\n")
+	_, response := resourceRequest(t, server, http.MethodGet, "/api/v1/info", "")
+	var info struct {
+		Version string            `json:"version"`
+		Build   string            `json:"version_code"`
+		Memory  map[string]uint64 `json:"memory"`
+	}
+	if err := json.Unmarshal(response.Data, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Version != "v8.5.3" || info.Build != "1084" {
+		t.Fatal("版本没有按运行实例缓存", info)
+	}
+	if len(info.Memory) != 4 || info.Memory["heap_alloc_bytes"] == 0 || info.Memory["heap_inuse_bytes"] < info.Memory["heap_alloc_bytes"] || info.Memory["stack_inuse_bytes"] == 0 {
+		t.Fatal("内存指标字段或语义发生变化", info.Memory)
 	}
 }
 

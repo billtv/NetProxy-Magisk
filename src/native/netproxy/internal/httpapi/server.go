@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/metrics"
 	"slices"
 	"strings"
 	"sync"
@@ -25,34 +26,38 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/apiconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 )
 
 const (
-	bodyLimit        = 8 << 20
+	bodyLimit        = 4 << 20
 	maxOperationTime = 10 * time.Minute
 )
 
 type Server struct {
-	options        moduleapp.Options
-	config         apiconfig.Config
-	mux            *http.ServeMux
-	instance       string
-	expensive      chan struct{}
-	writeSlots     chan struct{}
-	stopping       atomic.Bool
-	eventMu        sync.Mutex
-	events         *eventHub
-	admissionMu    sync.Mutex
-	inFlight       sync.WaitGroup
-	lifetime       context.Context
-	stopEvents     context.CancelFunc
-	platform       platformQuerier
-	platformSlots  chan struct{}
-	provisionMu    sync.Mutex
-	provisionAfter time.Time
+	options          moduleapp.Options
+	config           apiconfig.Config
+	mux              *http.ServeMux
+	instance         string
+	version          string
+	versionCode      string
+	expensive        chan struct{}
+	writeSlots       chan struct{}
+	stopping         atomic.Bool
+	eventMu          sync.Mutex
+	events           *eventHub
+	admissionMu      sync.Mutex
+	inFlight         sync.WaitGroup
+	lifetime         context.Context
+	stopEvents       context.CancelFunc
+	platform         platformQuerier
+	platformSlots    chan struct{}
+	provisionMu      sync.Mutex
+	provisionAfter   time.Time
+	provisionBackoff time.Duration
 }
 
 func New(options moduleapp.Options, config apiconfig.Config) (*Server, error) {
@@ -67,6 +72,8 @@ func New(options moduleapp.Options, config apiconfig.Config) (*Server, error) {
 		instance: hex.EncodeToString(identity[:]), expensive: make(chan struct{}, 4), writeSlots: make(chan struct{}, 8),
 		platform: androidplatform.Client{DEX: paths.New(options.ModuleDir).AndroidPlatformDEX()}, platformSlots: make(chan struct{}, 2)}
 	s.lifetime, s.stopEvents = context.WithCancel(context.Background())
+	s.options.TransferContext = s.lifetime
+	s.version, s.versionCode = readModuleVersion(paths.New(options.ModuleDir).ModuleProp())
 	s.route("GET /api/v1/info", 5*time.Second, false, s.info)
 	s.registerResources()
 	s.registerAndroid()
@@ -155,7 +162,6 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener) error
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Second))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.Host != s.config.Listen {
@@ -266,20 +272,28 @@ func (s *Server) fail(w http.ResponseWriter, ctx context.Context, err error) {
 }
 
 func failureStatus(code string, err error) int {
+	if value, ok := errors.AsType[*contract.Error](err); ok && value.HTTPStatus != 0 {
+		return value.HTTPStatus
+	}
+	if _, ok := errors.AsType[*inbound.ValidationError](err); ok {
+		return http.StatusUnprocessableEntity
+	}
 	switch {
 	case code == "usage.invalid", code == "api.query_invalid":
 		return http.StatusBadRequest
-	case strings.HasSuffix(code, ".conflict"), strings.HasSuffix(code, ".busy"):
+	case slices.Contains([]string{"config.conflict", "subscription.conflict", "subscription.busy", "api.busy", "node.delay_busy"}, code):
 		return http.StatusConflict
-	case strings.HasSuffix(code, ".not_found"), errors.Is(err, os.ErrNotExist):
+	case code == "android.icon.not_found", code == "node.delay_target_missing", errors.Is(err, os.ErrNotExist):
 		return http.StatusNotFound
-	case code == "command.timeout":
+	case code == "command.timeout", code == "node.delay_timeout":
 		return http.StatusGatewayTimeout
-	case code == "command.canceled":
+	case code == "command.canceled", code == "subscription.cancelled":
 		return http.StatusRequestTimeout
-	case strings.HasSuffix(code, ".runtime_sync_failed"):
+	case slices.Contains([]string{"node.runtime_sync_failed", "mode.runtime_sync_failed", "subscription.runtime_sync_failed", "node.delay_api_failed"}, code):
 		return http.StatusBadGateway
-	case strings.HasSuffix(code, ".invalid"), strings.HasSuffix(code, "_invalid"), strings.HasPrefix(code, "inbound."), strings.HasPrefix(code, "tun."), strings.HasPrefix(code, "ebpf."):
+	case slices.Contains([]string{"subscription.invalid_target", "subscription.invalid_group", "subscription.read_only", "subscription.interval_too_short",
+		"subscription.edit_invalid", "subscription.proxy_mode_invalid", "subscription.timeout_invalid", "subscription.text_invalid", "mode.invalid", "mode.unavailable",
+		"ebpf.status_invalid", "ebpf.unsupported", "network.direct_route_required"}, code):
 		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusInternalServerError
@@ -311,9 +325,22 @@ func decodeRequestLimit(r *http.Request, target any, limit int64) error {
 	if media := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0]); media != "application/json" {
 		return invalid("请求正文必须为 application/json")
 	}
-	content, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if err != nil || len(content) > int(limit) {
-		return invalid("请求正文读取失败或超出大小限制")
+	tooLarge := func() error {
+		return &contract.Error{Code: "api.body_too_large", Message: "请求正文超出大小限制", HTTPStatus: http.StatusRequestEntityTooLarge}
+	}
+	if r.ContentLength > limit {
+		return tooLarge()
+	}
+	var body bytes.Buffer
+	if r.ContentLength > 0 {
+		body.Grow(int(r.ContentLength) + bytes.MinRead)
+	}
+	if _, err := body.ReadFrom(io.LimitReader(r.Body, limit+1)); err != nil {
+		return invalid("请求正文读取失败")
+	}
+	content := body.Bytes()
+	if int64(len(content)) > limit {
+		return tooLarge()
 	}
 	decoder := jsontext.NewDecoder(bytes.NewReader(content))
 	token, err := decoder.ReadToken()
@@ -336,10 +363,10 @@ func decodeRequestLimit(r *http.Request, target any, limit int64) error {
 }
 
 func invalid(message string) error {
-	return &contract.Error{Code: "usage.invalid", Message: message, Status: 2}
+	return &contract.Error{Code: "usage.invalid", Message: message, Status: 2, HTTPStatus: http.StatusBadRequest}
 }
 func busy() error {
-	return &contract.Error{Code: "api.busy", Message: "操作正在进行，请稍后再试"}
+	return &contract.Error{Code: "api.busy", Message: "操作正在进行，请稍后再试", HTTPStatus: http.StatusConflict}
 }
 
 func (s *Server) controlOptions() service.Options {
@@ -352,10 +379,19 @@ func (s *Server) controlOptions() service.Options {
 }
 
 func (s *Server) info(context.Context, *http.Request) (contract.Result, error) {
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
+	memory := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}, {Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"}, {Name: "/memory/classes/heap/stacks:bytes"}}
+	metrics.Read(memory)
+	return contract.Success("api.info", "模块管理接口", map[string]any{"api_version": 1, "version": s.version,
+		"memory": map[string]uint64{"heap_alloc_bytes": memory[0].Value.Uint64(), "heap_inuse_bytes": memory[0].Value.Uint64() + memory[1].Value.Uint64(),
+			"heap_released_bytes": memory[2].Value.Uint64(), "stack_inuse_bytes": memory[3].Value.Uint64()},
+		"version_code": s.versionCode, "instance_id": s.instance, "pid": os.Getpid(), "platform": runtime.GOOS,
+		"capabilities": []string{"module", "catalog", "subscriptions", "offline_delay", "events"}}), nil
+}
+
+func readModuleVersion(path string) (string, string) {
 	version, build := "unknown", "unknown"
-	if content, err := os.ReadFile(paths.New(s.options.ModuleDir).ModuleProp()); err == nil {
+	if content, err := os.ReadFile(path); err == nil {
 		for line := range strings.SplitSeq(string(content), "\n") {
 			key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
 			switch key {
@@ -366,8 +402,5 @@ func (s *Server) info(context.Context, *http.Request) (contract.Result, error) {
 			}
 		}
 	}
-	return contract.Success("api.info", "模块管理接口", map[string]any{"api_version": 1, "version": version,
-		"memory":       map[string]uint64{"heap_alloc_bytes": memory.HeapAlloc, "heap_inuse_bytes": memory.HeapInuse, "heap_released_bytes": memory.HeapReleased, "stack_inuse_bytes": memory.StackInuse},
-		"version_code": build, "instance_id": s.instance, "pid": os.Getpid(), "platform": runtime.GOOS,
-		"capabilities": []string{"module", "catalog", "subscriptions", "offline_delay", "events"}}), nil
+	return version, build
 }

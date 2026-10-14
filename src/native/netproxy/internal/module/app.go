@@ -45,6 +45,8 @@ type Options struct {
 	WorkerLogFile      string
 	WiFiStateFile      string
 	RequestTimeout     time.Duration
+	// TransferContext 仅在服务生命周期结束时取消订阅下载，不取消持久事务。
+	TransferContext    context.Context
 	NetworkStateReader worker.NetworkStateReader
 	Telemetry          *telemetry.Reporter
 	configEditors      map[string]*moduleconfig.Editor
@@ -804,6 +806,7 @@ func workerOptions(options Options) worker.Options {
 	workerOptions := worker.Options{
 		Root:                options.CatalogRoot,
 		ProgressDir:         options.ProgressDir,
+		TransferContext:     options.TransferContext,
 		PIDFile:             options.WorkerPIDFile,
 		LogFile:             options.WorkerLogFile,
 		ModuleConfig:        options.ModuleConfig,

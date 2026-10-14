@@ -19,10 +19,11 @@ type Result struct {
 }
 
 type Error struct {
-	Status  int
-	Code    string
-	Message string
-	Data    any
+	Status     int
+	HTTPStatus int
+	Code       string
+	Message    string
+	Data       any
 }
 
 func (err *Error) Error() string { return err.Message }

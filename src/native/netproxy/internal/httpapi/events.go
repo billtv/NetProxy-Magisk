@@ -6,7 +6,6 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,12 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/fsnotify/fsnotify"
 )
@@ -50,20 +47,22 @@ type coreEvent struct {
 	generation uint64
 	status     *serviceapi.Status
 	groups     *[]serviceapi.Group
+	mode       *string
 	err        error
 }
 
 type eventHub struct {
-	server  *Server
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	clients map[*eventSubscriber]struct{}
-	latest  map[string]eventMessage
-	wake    chan struct{}
-	done    chan struct{}
-	epoch   atomic.Uint64
-	native  atomic.Pointer[moduleapp.ServiceState]
+	server     *Server
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	clients    map[*eventSubscriber]struct{}
+	latest     map[string]eventMessage
+	wake       chan struct{}
+	done       chan struct{}
+	epoch      atomic.Uint64
+	native     atomic.Pointer[moduleapp.ServiceState]
+	stateCache eventStateCache
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
@@ -135,13 +134,15 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			h.cancel()
 		}
 		h.mu.Unlock()
+		select {
+		case h.wake <- struct{}{}:
+		default:
+		}
 	}()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
 	controller := http.NewResponseController(w)
-	// 普通请求读取期限会取消 SSE 长连接；流存活由心跳和写入期限约束。
-	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
 		return
@@ -192,6 +193,25 @@ func (h *eventHub) interests() int {
 	return topics
 }
 
+func (h *eventHub) missingTopics() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	topics := 0
+	for client := range h.clients {
+		topics |= client.topics
+	}
+	for _, event := range h.latest {
+		topics &^= event.topic
+	}
+	// traffic 不是完整 status 快照，不能代替新消费者的初始 status。
+	if _, exists := h.latest["status"]; !exists {
+		for client := range h.clients {
+			topics |= client.topics & topicStatus
+		}
+	}
+	return topics
+}
+
 func (h *eventHub) emit(topic int, name string, response contract.Result) {
 	h.emitAt(topic, name, response, h.epoch.Load())
 }
@@ -207,8 +227,8 @@ func (h *eventHub) validEvent(event eventMessage) bool {
 	if saved == nil {
 		return true
 	}
-	state, err := moduleapp.ReadServiceState(h.server.options.StateFile)
-	return err == nil && state == *saved
+	state, err := h.readNative()
+	return err == nil && state == *saved && event.epoch == h.epoch.Load()
 }
 
 func (h *eventHub) emitAt(topic int, name string, response contract.Result, epoch uint64) {
@@ -228,7 +248,7 @@ func (h *eventHub) emitAt(topic int, name string, response contract.Result, epoc
 		if client.topics&topic == 0 {
 			continue
 		}
-		if exists && bytes.Equal(previous.content, content) && client.seen[name] {
+		if exists && previous.epoch == epoch && bytes.Equal(previous.content, content) && client.seen[name] {
 			continue
 		}
 		select {
@@ -291,158 +311,10 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 			flush = timer.C
 		}
 	}
-	coreMessages := make(chan coreEvent, 8)
-	var stopCore context.CancelFunc
-	var coreDone chan struct{}
-	defer func() {
-		if stopCore != nil {
-			stopCore()
-			<-coreDone
-		}
-	}()
-	var identity int64
-	var generation uint64
-	var saved moduleapp.ServiceState
-	var snapshot service.Snapshot
-	runtimeGroups := []serviceapi.Group{}
-	runtimeGroupsReady := false
-	var syncCore func() bool
-	refresh := func(topics int) {
-		syncCore()
-		epoch := h.epoch.Load()
-		ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
-		defer cancel()
-		if topics&topicStatus != 0 {
-			data, err := service.ReadStatus(ctx, h.server.controlOptions())
-			if err != nil {
-				response, _ := contract.Failure(ctx, err)
-				h.emitAt(topicStatus, "status", response, epoch)
-			} else {
-				h.emitAt(topicStatus, "status", contract.Success("service.status", "服务状态", data), epoch)
-			}
-		}
-		if topics&topicGroups != 0 {
-			groups, err := service.ReadNodes(ctx, h.server.controlOptions(), "")
-			module, moduleErr := moduleconfig.LoadModule(h.server.options.ModuleConfig)
-			if err == nil {
-				err = moduleErr
-			}
-			if err != nil {
-				response, _ := contract.Failure(ctx, err)
-				h.emitAt(topicGroups, "groups", response, epoch)
-			} else {
-				snapshot = service.Snapshot{Groups: groups}
-				if identity > 0 && runtimeGroupsReady {
-					snapshot.RuntimeGroups = runtimeGroups
-				}
-				snapshot.Selection = service.SelectionFromRuntimeGroups(module, groups, snapshot.RuntimeGroups)
-				h.emitAt(topicGroups, "groups", contract.Success("node.snapshot", "节点快照", snapshot), epoch)
-			}
-		}
-		if topics&topicSubscriptions != 0 {
-			groups, err := h.server.catalogSummaries(ctx)
-			if err != nil {
-				response, _ := contract.Failure(ctx, err)
-				h.emit(topicSubscriptions, "subscriptions", response)
-			} else {
-				h.emit(topicSubscriptions, "subscriptions", contract.Success("subscription.list", "订阅状态", groups))
-			}
-		}
-	}
-	syncCore = func() bool {
-		state, _ := moduleapp.ReadServiceState(h.server.options.StateFile)
-		next := int64(0)
-		if h.interests()&(topicStatus|topicGroups) != 0 && state.State == "ready" && state.PID > 0 && service.FindProcess(h.server.options.SingBoxPath, int(state.PID)) == int(state.PID) {
-			next = state.CoreStartedAtMillis
-		}
-		changed := state != saved || next != identity
-		if state != saved || h.native.Load() == nil {
-			h.epoch.Add(1)
-			copy := state
-			h.native.Store(&copy)
-			h.mu.Lock()
-			for name, event := range h.latest {
-				if event.topic != topicSubscriptions {
-					delete(h.latest, name)
-				}
-			}
-			h.mu.Unlock()
-		}
-		saved = state
-		if next == identity {
-			return changed
-		}
-		generation++
-		h.mu.Lock()
-		delete(h.latest, "traffic")
-		delete(h.latest, "groups")
-		h.mu.Unlock()
-		if stopCore != nil {
-			stopCore()
-			<-coreDone
-			stopCore, coreDone = nil, nil
-		}
-		identity, runtimeGroups = 0, []serviceapi.Group{}
-		runtimeGroupsReady = false
-		h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心控制接口正在校准", map[string]any{"available": false}))
-		if next == 0 {
-			h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心未运行", map[string]any{"available": false}))
-			return true
-		}
-		client, err := serviceapi.New(h.server.options.ServiceAddress, h.server.options.ServiceSecret)
-		if err != nil {
-			return changed
-		}
-		ctx, cancel := context.WithTimeout(h.ctx, time.Second)
-		started, err := client.Ready(ctx)
-		cancel()
-		if err != nil || started.UnixMilli != next {
-			client.Close()
-			return changed
-		}
-		identity = next
-		coreContext, cancel := context.WithCancel(h.ctx)
-		stopCore, coreDone = cancel, make(chan struct{})
-		streamGeneration, finished := generation, coreDone
-		go func() {
-			defer close(finished)
-			defer client.Close()
-			send := func(value coreEvent) error {
-				value.generation = streamGeneration
-				select {
-				case coreMessages <- value:
-					return nil
-				case <-coreContext.Done():
-					return coreContext.Err()
-				}
-			}
-			var tasks sync.WaitGroup
-			tasks.Go(func() {
-				err := client.SubscribeStatus(coreContext, time.Second, func(value serviceapi.Status) error { return send(coreEvent{status: &value}) })
-				if coreContext.Err() == nil {
-					if err == nil {
-						err = io.EOF
-					}
-					_ = send(coreEvent{err: err})
-					cancel()
-				}
-			})
-			tasks.Go(func() {
-				err := client.SubscribeGroups(coreContext, func(value []serviceapi.Group) error { return send(coreEvent{groups: &value}) })
-				if coreContext.Err() == nil {
-					if err == nil {
-						err = io.EOF
-					}
-					_ = send(coreEvent{err: err})
-					cancel()
-				}
-			})
-			tasks.Wait()
-		}()
-		return true
-	}
-	syncCore()
-	refresh(h.interests())
+	feed := newCoreFeed(h)
+	defer feed.close()
+	feed.sync()
+	feed.refresh(h.interests())
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
@@ -450,7 +322,10 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 		case <-h.ctx.Done():
 			return nil
 		case <-h.wake:
-			refresh(h.interests())
+			if feed.sync() {
+				feed.refresh(h.interests() & (topicStatus | topicGroups))
+			}
+			feed.refresh(h.missingTopics())
 			h.replay()
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -480,48 +355,19 @@ func (h *eventHub) runEvents(watcher *fsnotify.Watcher) error {
 			}
 			topics := dirty
 			dirty, flush = 0, nil
-			refresh(topics & h.interests())
+			if feed.sync() {
+				topics |= topicStatus | topicGroups
+			}
+			feed.refresh(topics & h.interests())
 		case <-tick.C:
-			if syncCore() {
-				refresh(h.interests() & (topicStatus | topicGroups))
+			if feed.sync() {
+				feed.refresh(h.interests() & (topicStatus | topicGroups))
 			}
-		case event := <-coreMessages:
-			if event.generation != generation || identity == 0 {
-				continue
-			}
-			current, stateErr := moduleapp.ReadServiceState(h.server.options.StateFile)
-			if stateErr != nil || current.State != "ready" || current.PID != saved.PID || current.CoreStartedAtMillis != identity {
-				if syncCore() {
-					refresh(h.interests())
-				}
-				continue
-			}
-			if event.err != nil {
-				if stopCore != nil {
-					stopCore()
-					<-coreDone
-					stopCore, coreDone = nil, nil
-				}
-				identity = 0
-				h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心控制接口暂不可用", map[string]any{"available": false}))
-				continue
-			}
-			if event.status != nil {
-				process, system, count := service.CPUUsage(int(saved.PID))
-				h.emit(topicStatus, "traffic", contract.Success("api.runtime_status", "核心实时状态", map[string]any{"available": true, "started_at_millis": identity, "status": *event.status,
-					"process_cpu_ticks": process, "system_cpu_ticks": system, "cpu_count": count}))
-			}
-			if event.groups != nil {
-				runtimeGroups = *event.groups
-				runtimeGroupsReady = true
-				snapshot.RuntimeGroups = *event.groups
-				if module, err := moduleconfig.LoadModule(h.server.options.ModuleConfig); err == nil {
-					snapshot.Selection = service.SelectionFromRuntimeGroups(module, snapshot.Groups, *event.groups)
-				}
-				h.emit(topicGroups, "groups", contract.Success("node.snapshot", "节点快照", snapshot))
-				if h.interests()&topicStatus != 0 {
-					refresh(topicStatus)
-				}
+		case <-feed.groupFlush:
+			feed.flushGroups()
+		case event := <-feed.messages:
+			if feed.consume(event) {
+				feed.refresh(h.interests() & (topicStatus | topicGroups))
 			}
 		}
 	}

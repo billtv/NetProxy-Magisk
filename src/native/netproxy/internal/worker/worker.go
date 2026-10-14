@@ -71,6 +71,8 @@ type Options struct {
 	ServiceSecret  string
 	ProxyURL       string
 	FallbackDirect bool
+	// TransferContext 只向订阅网络下载传递服务生命周期取消。
+	TransferContext context.Context
 	// PersistedBeforeUpdate 表示订阅编辑已保存设置，更新失败时不得误报为未保存。
 	PersistedBeforeUpdate   bool
 	NetworkWatchEnabled     bool
@@ -411,7 +413,8 @@ func UpdateGroup(ctx context.Context, options Options, groupID string, now time.
 	runtimeRunning := workerProcessRunning(options.SingBoxPath)
 	result, err := subscription.Update(ctx, subscription.UpdateOptions{
 		Root: options.Root, GroupID: groupID, ProgressDir: options.ProgressDir,
-		ProxyURL: options.ProxyURL, FallbackDirect: options.FallbackDirect,
+		TransferContext: options.TransferContext,
+		ProxyURL:        options.ProxyURL, FallbackDirect: options.FallbackDirect,
 		UseConfiguredProxy: true, RuntimeSyncPending: runtimeRunning,
 		PersistedBeforeUpdate: options.PersistedBeforeUpdate, Now: now,
 	})

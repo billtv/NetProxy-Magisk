@@ -27,7 +27,6 @@ const (
 	resourceReadTimeout         = 30 * time.Second
 	resourceWriteTimeout        = 120 * time.Second
 	resourceSubscriptionTimeout = 10 * time.Minute
-	resourceImportLimit         = 32 << 20
 	resourceMaxLogLines         = 2000
 )
 
@@ -217,7 +216,7 @@ func (s *Server) importNodes(ctx context.Context, r *http.Request) (contract.Res
 	if _, err := resourceQuery(r); err != nil {
 		return contract.Result{}, err
 	}
-	if err := decodeRequestLimit(r, &input, resourceImportLimit); err != nil {
+	if err := decodeRequest(r, &input); err != nil {
 		return contract.Result{}, err
 	}
 	if strings.TrimSpace(input.Content) == "" {
@@ -425,7 +424,7 @@ func (s *Server) showSubscription(ctx context.Context, r *http.Request) (contrac
 		return contract.Result{}, err
 	}
 	if len(groups) == 0 {
-		return contract.Result{}, &contract.Error{Code: "subscription.not_found", Message: "订阅不存在"}
+		return contract.Result{}, &contract.Error{Code: "subscription.not_found", Message: "订阅不存在", HTTPStatus: http.StatusNotFound}
 	}
 	return contract.Success("subscription.show", "订阅详情", groups[0]), nil
 }

@@ -22,6 +22,17 @@ type platformQuerier interface {
 
 var androidIconKey = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+const provisionCooldown = 30 * time.Second
+
+func androidIconSize(size int) int {
+	for _, bucket := range [...]int{48, 96, 144, 192} {
+		if size <= bucket {
+			return bucket
+		}
+	}
+	return 0
+}
+
 func platformPresent() bool {
 	_, err := os.Stat("/system/bin/app_process")
 	return err == nil
@@ -51,6 +62,7 @@ func (s *Server) registerAndroid() {
 			if err != nil || size < 16 || size > 192 {
 				return contract.Result{}, invalid("图标尺寸必须为 16–192 像素")
 			}
+			size = androidIconSize(size)
 		}
 		cache := ""
 		if size > 0 {
@@ -74,14 +86,14 @@ func (s *Server) readAndroidIcon(w http.ResponseWriter, r *http.Request) {
 	user, err := strconv.ParseUint(r.PathValue("user"), 10, 32)
 	size, sizeErr := strconv.Atoi(r.PathValue("size"))
 	key := r.PathValue("key")
-	if _, queryErr := resourceQuery(r); queryErr != nil || err != nil || user > 21474 || sizeErr != nil || size < 16 || size > 192 || !androidIconKey.MatchString(key) {
+	if _, queryErr := resourceQuery(r); queryErr != nil || err != nil || user > 21474 || sizeErr != nil || size < 16 || size != androidIconSize(size) || !androidIconKey.MatchString(key) {
 		s.fail(w, r.Context(), invalid("图标资源标识无效"))
 		return
 	}
 	file, err := os.Open(filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), strconv.FormatUint(user, 10), strconv.Itoa(size), key+".png"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			err = &contract.Error{Code: "android.icon.not_found", Message: "图标缓存不存在，请刷新应用清单"}
+			err = &contract.Error{Code: "android.icon.not_found", Message: "图标缓存不存在，请刷新应用清单", HTTPStatus: http.StatusNotFound}
 		}
 		s.fail(w, r.Context(), err)
 		return
@@ -132,8 +144,19 @@ func (s *Server) provisionClient(ctx context.Context, r *http.Request) (contract
 	if err := ctx.Err(); err != nil {
 		return contract.Result{}, err
 	}
-	s.provisionAfter = time.Now().Add(3 * time.Second)
+	// 启动时的主动交付也遵守 HTTP 的时限，失败不能立即占用下一次进程启动。
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	connection := s.config.Connection()
 	_, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "provision", Connection: &connection})
+	delay := provisionCooldown
+	if err != nil {
+		// 首次失败保留安装后的短重试窗口，连续失败最多退避到 30 秒。
+		s.provisionBackoff = min(provisionCooldown, max(3*time.Second, 2*s.provisionBackoff))
+		delay = s.provisionBackoff
+	} else {
+		s.provisionBackoff = 0
+	}
+	s.provisionAfter = time.Now().Add(delay)
 	return contract.Success("api.provisioned", "连接资料已交付到官方管理器", map[string]bool{"delivered": true}), err
 }
