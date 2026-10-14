@@ -6,7 +6,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
-import kotlinx.serialization.json.*
 
 @Serializable
 internal data class AndroidApp(
@@ -16,6 +15,7 @@ internal data class AndroidApp(
     val system: Boolean,
     @SerialName("version_code") val versionCode: Long,
     @SerialName("last_update_time") val lastUpdateTime: Long,
+    @SerialName("icon_key") val iconKey: String,
 )
 
 @Serializable
@@ -43,30 +43,21 @@ internal class AppPackageRepository(private val client: ModuleApiClient) {
         }
     }
 
-    suspend fun getApplications(user: String = "0"): List<AndroidApp> {
+    suspend fun getApplications(user: String = "0", size: Int = 96): List<AndroidApp> {
+        val key = "$user:$size"
         val (version, query) = mutex.withLock {
-            applications[user]?.let { return it.apps }
-            generation to queries.getOrPut("apps:$user") { Mutex() }
+            applications[key]?.let { return it.apps }
+            generation to queries.getOrPut("apps:$key") { Mutex() }
         }
         return query.withLock {
-            mutex.withLock { if (generation == version) applications[user] else null }?.let { return@withLock it.apps }
-            val result = client.read<AndroidApps>("/android/apps", mapOf("user_id" to user))
-            mutex.withLock { if (generation == version) applications[user] = result }
+            mutex.withLock { if (generation == version) applications[key] else null }?.let { return@withLock it.apps }
+            val result = client.read<AndroidApps>("/android/apps", mapOf("user_id" to user, "size" to size.toString()))
+            mutex.withLock { if (generation == version) applications[key] = result }
             result.apps
         }
     }
 
-    suspend fun icons(userId: String, packages: List<String>, size: Int): Map<String, ByteArray> {
-        val result = client.post("/android/apps/icons", buildJsonObject {
-            put("user_id", userId.toInt()); put("size", size.coerceIn(16, 192))
-            put("packages", JsonArray(packages.map(::JsonPrimitive)))
-        }, mutation = false).data.jsonArray
-        return result.mapNotNull { entry ->
-            val icon = entry.jsonObject
-            val png = icon["png"]?.jsonPrimitive?.content ?: return@mapNotNull null
-            icon.getValue("package_name").jsonPrimitive.content to android.util.Base64.decode(png, android.util.Base64.DEFAULT)
-        }.toMap()
-    }
+    suspend fun icon(key: String): ByteArray = client.image("/android/icons/$key")
 
     suspend fun invalidatePackageListingCaches() = mutex.withLock {
         users = null

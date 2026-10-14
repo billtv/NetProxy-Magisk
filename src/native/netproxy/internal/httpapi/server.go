@@ -352,6 +352,8 @@ func (s *Server) controlOptions() service.Options {
 }
 
 func (s *Server) info(context.Context, *http.Request) (contract.Result, error) {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
 	version, build := "unknown", "unknown"
 	if content, err := os.ReadFile(paths.New(s.options.ModuleDir).ModuleProp()); err == nil {
 		for line := range strings.SplitSeq(string(content), "\n") {
@@ -365,6 +367,7 @@ func (s *Server) info(context.Context, *http.Request) (contract.Result, error) {
 		}
 	}
 	return contract.Success("api.info", "模块管理接口", map[string]any{"api_version": 1, "version": version,
+		"memory":       map[string]uint64{"heap_alloc_bytes": memory.HeapAlloc, "heap_inuse_bytes": memory.HeapInuse, "heap_released_bytes": memory.HeapReleased, "stack_inuse_bytes": memory.StackInuse},
 		"version_code": build, "instance_id": s.instance, "pid": os.Getpid(), "platform": runtime.GOOS,
 		"capabilities": []string{"module", "catalog", "subscriptions", "offline_delay", "events"}}), nil
 }

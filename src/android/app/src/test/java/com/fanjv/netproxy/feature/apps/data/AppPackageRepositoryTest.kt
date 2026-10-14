@@ -11,7 +11,7 @@ import org.junit.Test
 
 class AppPackageRepositoryTest {
     private fun listing(name: String, user: Int = 0, label: String = name) = apiSuccess(
-        """{"user_id":$user,"revision":"apps","apps":[{"package_name":"$name","label":"$label","uid":${user * 100000 + 10001},"system":false,"version_code":1,"last_update_time":1}]}"""
+        """{"user_id":$user,"revision":"apps","apps":[{"package_name":"$name","label":"$label","uid":${user * 100000 + 10001},"system":false,"version_code":1,"last_update_time":1,"icon_key":"$user/96/key"}]}"""
     )
 
     @Test fun invalidationReloadsUsersAndPackageListings() = runBlocking {
@@ -62,5 +62,27 @@ class AppPackageRepositoryTest {
                 assertEquals("android.unavailable", error.resultCode)
             }
         }
+    }
+
+    @Test fun sizeSeparatesListingsAndIconsUseBinaryTransport() = runBlocking {
+        val sizes = mutableListOf<String>()
+        val png = byteArrayOf(1, 2, 3)
+        val transport = object : TestApiTransport() {
+            override suspend fun respond(request: ApiTestRequest): ModuleHttpResponse {
+                assertEquals("/android/apps", request.path)
+                sizes += request.query.getValue("size")
+                return listing("example.app")
+            }
+            override suspend fun image(path: String): ByteArray {
+                assertEquals("/android/icons/0/96/key", path)
+                return png
+            }
+        }
+        val repository = AppPackageRepository(ModuleApiClient(transport))
+        val key = repository.getApplications(size = 96).single().iconKey
+        repository.getApplications(size = 140)
+        repository.getApplications(size = 96)
+        assertEquals(listOf("96", "140"), sizes)
+        assertArrayEquals(png, repository.icon(key))
     }
 }

@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
@@ -49,16 +51,17 @@ internal class AppsViewModel(
     private var requestedConfig: AppProxyConfig? = null
     private val policyMutationMutex = Mutex()
     private var loaded = false
+    private var iconSize = 96
 
-    fun load(force: Boolean = false) {
+    fun load(force: Boolean = false, size: Int = iconSize) {
         if (_state.value.requiresPolicyReload) return
-        if (!force && (loadJob?.isActive == true || loaded)) return
+        if (!force && size == iconSize && (loadJob?.isActive == true || loaded)) return
+        iconSize = size
         val revision = ++loadRevision
         loadJob?.cancel()
         if (force) {
             modelRevision++
             modelJob?.cancel()
-            AppIconCache.clear()
             loaded = false
         }
         _state.update { it.copy(isLoadingApps = true, error = "") }
@@ -86,8 +89,8 @@ internal class AppsViewModel(
                 val master = withContext(Dispatchers.IO) {
                     users.map { user ->
                         async {
-                            packageCatalog.getApplications(user.id).map { app ->
-                                AppInfoModel(app.packageName, app.label, user.id, app.system)
+                            packageCatalog.getApplications(user.id, size).map { app ->
+                                AppInfoModel(app.packageName, app.label, user.id, app.system, app.iconKey)
                             }
                         }
                     }.awaitAll().flatten()
@@ -219,15 +222,20 @@ internal class AppsViewModel(
         }
     }
 
-    suspend fun loadIcons(references: List<String>, size: Int) {
+    suspend fun loadIcons(references: List<String>) = coroutineScope {
         val generation = AppIconCache.generation
-        references.mapNotNull(::splitAppId).groupBy { it.second }.forEach { (user, entries) ->
-            val missing = entries.map { it.first }.distinct().filter { AppIconCache.cachedIcon(it, user, size) == null }
-            missing.chunked(32).forEach { packages ->
-                val icons = packageCatalog.icons(user, packages, size)
-                AppIconCache.putIcons(user, size, icons, generation)
-            }
-        }
+        val ids = references.toSet()
+        val slots = Semaphore(4)
+        _state.value.masterAppList.filter { it.id in ids }.map { it.iconKey }.distinct()
+            .filter { it.isNotEmpty() && AppIconCache.cachedIcon(it) == null }.map { key ->
+                async {
+                    slots.withPermit {
+                        try { AppIconCache.putIcon(key, packageCatalog.icon(key), generation) }
+                        catch (error: CancellationException) { throw error }
+                        catch (_: Exception) { }
+                    }
+                }
+            }.awaitAll()
     }
 
     private fun activeItems(config: AppProxyConfig): Set<String> =
@@ -260,12 +268,6 @@ internal class AppsViewModel(
         config.enabled != confirmedConfig.enabled || config.mode != confirmedConfig.mode ||
             config.proxyApps.toSet() != confirmedConfig.proxyApps.toSet() ||
             config.bypassApps.toSet() != confirmedConfig.bypassApps.toSet()
-
-    private fun splitAppId(value: String): Pair<String, String>? {
-        val separator = value.indexOf(':')
-        if (separator <= 0 || separator == value.lastIndex) return null
-        return value.substring(separator + 1) to value.substring(0, separator)
-    }
 
 }
 

@@ -16,8 +16,8 @@ import (
 type Request struct {
 	Operation  string                `json:"operation"`
 	UserID     uint32                `json:"user_id"`
-	Packages   []string              `json:"packages,omitempty"`
 	Size       int                   `json:"size,omitempty"`
+	IconCache  string                `json:"icon_cache,omitempty"`
 	Connection *apiconfig.Connection `json:"connection,omitempty"`
 }
 
@@ -28,7 +28,7 @@ func (client Client) Query(ctx context.Context, request Request) (jsontext.Value
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/system/bin/app_process", "-Djava.class.path="+client.DEX, "/system/bin", "com.fanjv.netproxy.platform.Main")
 	command.Stdin = bytes.NewReader(content)

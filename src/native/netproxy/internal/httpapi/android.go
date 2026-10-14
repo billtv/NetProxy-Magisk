@@ -5,19 +5,22 @@ import (
 	"encoding/json/jsontext"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/androidplatform"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/processlock"
 )
 
 type platformQuerier interface {
 	Query(context.Context, androidplatform.Request) (jsontext.Value, error)
 }
 
-var androidPackageName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*$`)
+var androidIconKey = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func platformPresent() bool {
 	_, err := os.Stat("/system/bin/app_process")
@@ -33,8 +36,8 @@ func (s *Server) registerAndroid() {
 		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "users"})
 		return contract.Success("android.users", "Android 用户", data), err
 	})
-	s.registerRoute("GET /api/v1/android/apps", 15*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
-		query, err := resourceQuery(r, "user_id")
+	s.registerRoute("GET /api/v1/android/apps", 45*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
+		query, err := resourceQuery(r, "user_id", "size")
 		if err != nil {
 			return contract.Result{}, err
 		}
@@ -42,32 +45,58 @@ func (s *Server) registerAndroid() {
 		if err != nil || user > 21474 {
 			return contract.Result{}, invalid("Android 用户 ID 无效")
 		}
-		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "apps", UserID: uint32(user)})
-		return contract.Success("android.apps", "Android 应用", data), err
-	})
-	s.registerRoute("POST /api/v1/android/apps/icons", 15*time.Second, false, false, func(ctx context.Context, r *http.Request) (contract.Result, error) {
-		if _, err := resourceQuery(r); err != nil {
-			return contract.Result{}, err
-		}
-		var request struct {
-			UserID   *uint32  `json:"user_id"`
-			Packages []string `json:"packages"`
-			Size     int      `json:"size"`
-		}
-		if err := decodeRequestLimit(r, &request, 16<<10); err != nil {
-			return contract.Result{}, err
-		}
-		if request.UserID == nil || *request.UserID > 21474 || len(request.Packages) == 0 || len(request.Packages) > 32 || request.Size < 16 || request.Size > 192 {
-			return contract.Result{}, invalid("图标查询需要有效用户、尺寸与最多 32 个应用")
-		}
-		for _, name := range request.Packages {
-			if len(name) > 255 || !androidPackageName.MatchString(name) {
-				return contract.Result{}, invalid("Android 包名无效")
+		size := 0
+		if query.Has("size") {
+			size, err = strconv.Atoi(query.Get("size"))
+			if err != nil || size < 16 || size > 192 {
+				return contract.Result{}, invalid("图标尺寸必须为 16–192 像素")
 			}
 		}
-		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "icons", UserID: *request.UserID, Packages: request.Packages, Size: request.Size})
-		return contract.Success("android.icons", "应用图标", data), err
+		cache := ""
+		if size > 0 {
+			cache = filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), strconv.FormatUint(user, 10), strconv.Itoa(size))
+			if err := os.MkdirAll(cache, 0o700); err != nil {
+				return contract.Result{}, err
+			}
+			lock, err := processlock.Acquire(ctx, cache+".lock")
+			if err != nil {
+				return contract.Result{}, err
+			}
+			defer lock.Release()
+		}
+		data, err := s.queryPlatform(ctx, androidplatform.Request{Operation: "apps", UserID: uint32(user), Size: size, IconCache: cache})
+		return contract.Success("android.apps", "Android 应用", data), err
 	})
+	s.mux.HandleFunc("GET /api/v1/android/icons/{user}/{size}/{key}", s.readAndroidIcon)
+}
+
+func (s *Server) readAndroidIcon(w http.ResponseWriter, r *http.Request) {
+	user, err := strconv.ParseUint(r.PathValue("user"), 10, 32)
+	size, sizeErr := strconv.Atoi(r.PathValue("size"))
+	key := r.PathValue("key")
+	if _, queryErr := resourceQuery(r); queryErr != nil || err != nil || user > 21474 || sizeErr != nil || size < 16 || size > 192 || !androidIconKey.MatchString(key) {
+		s.fail(w, r.Context(), invalid("图标资源标识无效"))
+		return
+	}
+	file, err := os.Open(filepath.Join(paths.New(s.options.ModuleDir).AndroidIcons(), strconv.FormatUint(user, 10), strconv.Itoa(size), key+".png"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = &contract.Error{Code: "android.icon.not_found", Message: "图标缓存不存在，请刷新应用清单"}
+		}
+		s.fail(w, r.Context(), err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > 256<<10 {
+		s.fail(w, r.Context(), invalid("图标缓存无效"))
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=604800, immutable")
+	w.Header().Set("ETag", `"`+key+`"`)
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
+	http.ServeContent(w, r, key+".png", info.ModTime(), file)
 }
 
 func (s *Server) queryPlatform(ctx context.Context, request androidplatform.Request) (jsontext.Value, error) {

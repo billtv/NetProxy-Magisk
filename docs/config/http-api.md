@@ -93,7 +93,7 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /info` | 模块版本、API 版本和后台实例身份 |
+| `GET /info` | 模块版本、API 版本、后台实例身份与 Go 堆/栈内存字节数 |
 | `GET /service` | 服务状态、实际后端、模式与当前节点 |
 | `POST /service/start`、`stop`、`restart`、`reload`、`check` | 对应服务操作，无正文或传空对象 |
 | `GET /catalog` | 持久分组摘要 |
@@ -120,8 +120,8 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `GET /network/wifi-list` | 已保存的 Wi-Fi 名称 |
 | `GET /app-policy` | 当前应用策略；修改使用 `inbound/app` 配置目标 |
 | `GET /android/users` | Android 用户列表 |
-| `GET /android/apps?user_id=...` | 指定用户的应用、UID、名称与版本 |
-| `POST /android/apps/icons` | 同一用户最多 32 个应用的图标，正文为 `user_id/packages/size` |
+| `GET /android/apps?user_id=...&size=...` | 指定用户的应用、UID、名称与版本；可选 `size=16–192` 同时准备图标并返回 `icon_key` |
+| `GET /android/icons/{icon_key}` | 读取已准备的 PNG 图标；`icon_key` 包含用户、尺寸与资源版本，不再启动平台查询 |
 | `POST /diagnostics/ebpf` | 能力预检，正文含 `mode/raw` |
 | `GET /logs?kind=service&lines=200` | 脱敏日志，类型为 `service/core`，最多 2000 行 |
 | `DELETE /logs?kind=service` | 清空日志 |
@@ -136,7 +136,7 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 
 `POST /auth/provision` 是唯一无 Bearer 的引导入口，只允许无 Origin 的空请求或空对象。它不会返回凭据，只会验证用户 0 中官方管理器的签名并向其私有接收组件交付连接资料；其他应用不能借此取得管理权限。
 
-应用名称和图标由模块按需运行的小型 Java 辅助程序调用 Android 框架生成，按 Android 用户分别查询；图标以 PNG 的 base64 内容返回，尺寸范围为 16–192 像素。辅助程序不常驻，也不依赖管理器进程。
+应用名称和图标由模块按需运行的小型 Java 辅助程序调用 Android 框架生成，按 Android 用户分别查询。带 `size` 的清单请求准备可重建的图标缓存；客户端随后使用清单中的 `icon_key` 读取 PNG 二进制，不在滚动时反复启动辅助程序。应用更新、系统语言或资源配置变化会更新图标键。辅助程序不常驻，也不依赖管理器进程。
 
 ## 实时订阅
 

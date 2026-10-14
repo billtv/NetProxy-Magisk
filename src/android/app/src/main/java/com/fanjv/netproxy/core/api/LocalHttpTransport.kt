@@ -63,7 +63,7 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
             val credentials = connect()
             val connection = open(credentials, path, query)
             connection.requestMethod = method
-            connection.readTimeout = if (!mutation) 30_000 else if (path.startsWith("/subscriptions")) 615_000 else 135_000
+            connection.readTimeout = if (path == "/android/apps") 60_000 else if (!mutation) 30_000 else if (path.startsWith("/subscriptions")) 615_000 else 135_000
             try {
                 withHttpConnection(connection) {
                     if (body != null) {
@@ -94,6 +94,20 @@ internal class LocalHttpTransport(context: Context) : ModuleApiTransport {
                 throw ModuleApiException("api.connection_failed", "无法连接模块后台，操作结果需要重新确认")
             }
         }
+
+    override suspend fun image(path: String): ByteArray = withContext(Dispatchers.IO) {
+        val connection = open(connect(), path, emptyMap())
+        connection.readTimeout = 15_000
+        withHttpConnection(connection) {
+            val status = connection.responseCode
+            if (status != 200) {
+                ModuleApiCodec(json).decode(status, connection.errorStream?.use { String(it.readBytesLimited(64 * 1024), Charsets.UTF_8) }.orEmpty())
+                throw ModuleApiException("api.image_failed", "无法读取应用图标")
+            }
+            require(connection.contentType == "image/png")
+            connection.inputStream.use { it.readBytesLimited(256 * 1024) }
+        }
+    }
 
     override suspend fun download(path: String, query: Map<String, String>, destination: File) = withContext(Dispatchers.IO) {
         val connection = open(connect(), path, query)

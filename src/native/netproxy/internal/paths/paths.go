@@ -63,6 +63,8 @@ func (l Layout) APITempDir() string { return filepath.Join(l.DevRoot(), "http") 
 
 func (l Layout) AndroidPlatformDEX() string { return filepath.Join(l.Bin(), "android-platform.dex") }
 
+func (l Layout) AndroidIcons() string { return filepath.Join(l.Data(), "cache", "android-icons") }
+
 // InboundConfig 返回受管入站配置文件路径。
 func (l Layout) InboundConfig() string { return filepath.Join(l.Config(), "inbound", "inbound.json") }
 

@@ -19,16 +19,23 @@ import android.os.Looper;
 import android.os.Process;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.util.Base64;
+import android.system.Os;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class Main {
     public static final String MANAGER_PACKAGE = "com.fanjv.netproxy";
@@ -54,12 +61,12 @@ public final class Main {
             Object result;
             if ("users".equals(operation)) {
                 result = users(context);
-            } else if ("apps".equals(operation) || "icons".equals(operation)) {
+            } else if ("apps".equals(operation)) {
                 int user = request.getInt("user_id");
                 if (user < 0 || user > 21474) throw new IllegalArgumentException();
                 Context userContext = (Context) Context.class.getMethod("createContextAsUser", UserHandle.class, int.class)
                     .invoke(context, UserHandle.getUserHandleForUid(user * 100000), 0);
-                result = "apps".equals(operation) ? apps(userContext, user) : icons(userContext, request);
+                result = apps(userContext, user, request);
             } else if ("provision".equals(operation)) {
                 result = provision(context, request.getJSONObject("connection"));
             } else {
@@ -100,62 +107,84 @@ public final class Main {
         return result;
     }
 
-    private static JSONObject apps(Context context, int user) throws Exception {
+    private static JSONObject apps(Context context, int user, JSONObject request) throws Exception {
         PackageManager manager = context.getPackageManager();
-        List<ApplicationInfo> applications = new ArrayList<>(manager.getInstalledApplications(0));
-        Collections.sort(applications, new Comparator<ApplicationInfo>() {
-            @Override public int compare(ApplicationInfo first, ApplicationInfo second) {
+        List<PackageInfo> applications = new ArrayList<>(manager.getInstalledPackages(0));
+        Collections.sort(applications, new Comparator<PackageInfo>() {
+            @Override public int compare(PackageInfo first, PackageInfo second) {
                 return first.packageName.compareTo(second.packageName);
             }
         });
-        JSONArray result = new JSONArray();
-        for (ApplicationInfo info : applications) {
-            PackageInfo installed;
-            try {
-                installed = manager.getPackageInfo(info.packageName, 0);
-            } catch (PackageManager.NameNotFoundException removed) {
-                continue;
-            }
-            long version = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
-            result.put(new JSONObject().put("package_name", info.packageName).put("uid", info.uid)
-                .put("label", manager.getApplicationLabel(info).toString())
-                .put("system", (info.flags & ApplicationInfo.FLAG_SYSTEM) != 0)
-                .put("version_code", version).put("last_update_time", installed.lastUpdateTime));
-        }
+        int size = request.optInt("size", 0);
+        if (size != 0 && (size < 16 || size > 192)) throw new IllegalArgumentException();
+        File cache = size == 0 ? null : new File(request.getString("icon_cache"));
         String resources = context.getResources().getConfiguration().toString();
+        Set<String> retained = ConcurrentHashMap.newKeySet();
+        JSONArray result = new JSONArray();
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+            List<Future<JSONObject>> entries = new ArrayList<>();
+            for (PackageInfo installed : applications) {
+                if (installed.applicationInfo != null) entries.add(workers.submit(() -> app(manager, installed, user, size, resources, cache, retained)));
+            }
+            for (Future<JSONObject> entry : entries) result.put(entry.get());
+        } finally {
+            workers.shutdownNow();
+        }
+        if (cache != null) {
+            File[] files = cache.listFiles();
+            if (files != null) for (File file : files) {
+                String name = file.getName();
+                if ((name.matches("[a-f0-9]{64}\\.png") && !retained.contains(name)) || name.matches("[a-f0-9]{64}\\.png\\..+\\.tmp")) file.delete();
+            }
+        }
         String revision = digest((result.toString() + resources).getBytes(StandardCharsets.UTF_8));
         return new JSONObject().put("user_id", user).put("revision", revision).put("apps", result);
     }
 
-    private static JSONArray icons(Context context, JSONObject request) throws Exception {
-        JSONArray packages = request.getJSONArray("packages");
-        int size = request.getInt("size");
-        if (packages.length() == 0 || packages.length() > 32 || size < 16 || size > 192) throw new IllegalArgumentException();
-        PackageManager manager = context.getPackageManager();
-        JSONArray result = new JSONArray();
-        for (int index = 0; index < packages.length(); index++) {
-            String name = packages.getString(index);
-            JSONObject entry = new JSONObject().put("package_name", name);
-            Bitmap image = null;
+    private static JSONObject app(PackageManager manager, PackageInfo installed, int user, int size,
+        String resources, File cache, Set<String> retained) throws Exception {
+        ApplicationInfo info = installed.applicationInfo;
+        long version = Build.VERSION.SDK_INT >= 28 ? installed.getLongVersionCode() : installed.versionCode;
+        String label = manager.getApplicationLabel(info).toString();
+        String iconKey = "";
+        if (cache != null) {
+            String name = digest((user + ":" + size + ":" + info.packageName + ":" + version + ":" + installed.lastUpdateTime + ":" + resources)
+                .getBytes(StandardCharsets.UTF_8)) + ".png";
+            File target = new File(cache, name);
             try {
-                ApplicationInfo info = manager.getApplicationInfo(name, 0);
-                // loadIcon 的厂商主题扩展会访问仅注册应用进程可用的 Provider，直接读取原生图标资源。
-                Drawable drawable = info.icon == 0 ? manager.getDefaultActivityIcon()
-                    : manager.getResourcesForApplication(info).getDrawable(info.icon, null);
-                image = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-                drawable.setBounds(0, 0, size, size);
-                drawable.draw(new Canvas(image));
-                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-                if (!image.compress(Bitmap.CompressFormat.PNG, 100, bytes)) throw new IllegalStateException();
-                entry.put("png", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP));
-            } catch (PackageManager.NameNotFoundException missing) {
-                entry.put("missing", true);
-            } finally {
-                if (image != null) image.recycle();
+                if (!target.isFile() || target.length() == 0) writeIcon(manager, info, size, target);
+                retained.add(name);
+                iconKey = user + "/" + size + "/" + name.substring(0, 64);
+            } catch (Exception unavailable) {
+                // 单个应用资源损坏或卸载不应阻止其他应用展示。
             }
-            result.put(entry);
         }
-        return result;
+        return new JSONObject().put("package_name", info.packageName).put("uid", info.uid).put("label", label)
+            .put("system", (info.flags & ApplicationInfo.FLAG_SYSTEM) != 0)
+            .put("version_code", version).put("last_update_time", installed.lastUpdateTime).put("icon_key", iconKey);
+    }
+
+    private static void writeIcon(PackageManager manager, ApplicationInfo info, int size, File target) throws Exception {
+        // loadIcon 的厂商主题扩展会访问仅注册应用进程可用的 Provider，直接读取原生图标资源。
+        Drawable drawable = info.icon == 0 ? manager.getDefaultActivityIcon()
+            : manager.getResourcesForApplication(info).getDrawable(info.icon, null);
+        File temporary = File.createTempFile(target.getName() + ".", ".tmp", target.getParentFile());
+        Bitmap image = null;
+        try {
+            image = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+            drawable.setBounds(0, 0, size, size);
+            drawable.draw(new Canvas(image));
+            try (FileOutputStream output = new FileOutputStream(temporary)) {
+                Os.fchmod(output.getFD(), 0600);
+                if (!image.compress(Bitmap.CompressFormat.PNG, 100, output)) throw new IllegalStateException();
+                output.getFD().sync();
+            }
+            Os.rename(temporary.getPath(), target.getPath());
+        } finally {
+            temporary.delete();
+            if (image != null) image.recycle();
+        }
     }
 
     private static ProviderInfo verifyManager(PackageManager manager) throws Exception {

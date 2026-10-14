@@ -22,6 +22,7 @@ internal abstract class TestApiTransport : ModuleApiTransport {
         respond(ApiTestRequest(method, path, body ?: JsonObject(emptyMap()), query, mutation))
     abstract suspend fun respond(request: ApiTestRequest): ModuleHttpResponse
     override suspend fun download(path: String, query: Map<String, String>, destination: File): Unit = error("Unexpected download")
+    override suspend fun image(path: String): ByteArray = error("Unexpected image")
     override suspend fun watch(topics: Set<String>, consume: suspend (ModuleEvent) -> Unit): Unit = kotlinx.coroutines.awaitCancellation()
 }
 

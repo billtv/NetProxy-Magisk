@@ -25,19 +25,15 @@ object AppIconCache {
             ((value.width.toLong() * value.height * 4 + 1023) / 1024).coerceAtLeast(1).toInt()
     }
 
-    private fun cacheKey(userId: String, packageName: String, sizePx: Int) = "$userId:$packageName@$sizePx"
-    fun cachedIcon(packageName: String, userId: String, sizePx: Int): ImageBitmap? =
-        synchronized(cacheLock) { lruCache[cacheKey(userId, packageName, sizePx)] }
+    fun cachedIcon(key: String): ImageBitmap? = synchronized(cacheLock) { lruCache[key] }
 
-    suspend fun putIcons(userId: String, sizePx: Int, icons: Map<String, ByteArray>, expectedGeneration: Long) = withContext(Dispatchers.Default) {
-        val decoded = icons.mapNotNull { (name, bytes) ->
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()?.let { name to it }
-        }
+    suspend fun putIcon(key: String, bytes: ByteArray, expectedGeneration: Long) = withContext(Dispatchers.Default) {
+        val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() ?: return@withContext
         currentCoroutineContext().ensureActive()
         synchronized(cacheLock) {
             if (generation != expectedGeneration) return@synchronized
-            decoded.forEach { (name, image) -> lruCache.put(cacheKey(userId, name, sizePx), image) }
-            if (decoded.isNotEmpty()) revision++
+            lruCache.put(key, image)
+            revision++
         }
     }
 

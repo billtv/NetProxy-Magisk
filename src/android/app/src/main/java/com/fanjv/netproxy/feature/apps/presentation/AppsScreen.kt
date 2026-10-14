@@ -101,18 +101,16 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Composable
 fun AppIcon(
-    packageName: String,
-    userId: String,
+    app: AppInfoModel,
     modifier: Modifier = Modifier,
 ) {
-    val iconSizePx = with(LocalDensity.current) { 40.dp.roundToPx() }
     val iconRevision = AppIconCache.revision
-    var icon by remember(packageName, userId, iconSizePx) {
-        mutableStateOf(AppIconCache.cachedIcon(packageName, userId, iconSizePx))
+    var icon by remember(app.id) {
+        mutableStateOf(AppIconCache.cachedIcon(app.iconKey))
     }
 
-    LaunchedEffect(packageName, userId, iconSizePx, iconRevision) {
-        AppIconCache.cachedIcon(packageName, userId, iconSizePx)?.let { icon = it }
+    LaunchedEffect(app.iconKey, iconRevision) {
+        AppIconCache.cachedIcon(app.iconKey)?.let { icon = it }
     }
 
     Box(
@@ -154,16 +152,16 @@ internal fun AppsScreen(
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
 
-    val iconSize = with(LocalDensity.current) { 40.dp.roundToPx() }
+    val iconSize = with(LocalDensity.current) { 40.dp.roundToPx().coerceIn(16, 192) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     for (currentList in listOf(listState, searchListState)) {
-        LaunchedEffect(currentList, iconSize, lifecycle) {
+        LaunchedEffect(currentList, apps.masterAppList, lifecycle) {
             snapshotFlow {
                 val active = (currentList === listState) == searchStatus.isCollapsed()
                 (if (active) currentList.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String } else emptyList()) to AppIconCache.generation
             }.flowWithLifecycle(lifecycle, Lifecycle.State.RESUMED)
                 .distinctUntilChanged().collectLatest { (visible, _) ->
-                    try { viewModel.loadIcons(visible, iconSize) }
+                    try { viewModel.loadIcons(visible) }
                     catch (error: CancellationException) { throw error }
                     catch (_: Exception) { }
                 }
@@ -172,7 +170,7 @@ internal fun AppsScreen(
 
     val resources = LocalConfiguration.current
     LaunchedEffect(resources.locales.toLanguageTags(), resources.densityDpi) {
-        viewModel.load(force = apps.hasLoadedApps)
+        viewModel.load(force = apps.hasLoadedApps, size = iconSize)
     }
     val commitOnLeave = rememberCommitOnLeave(viewModel::requestPolicyFlush)
     val leave: () -> Unit = { commitOnLeave { onBack?.invoke() } }
@@ -481,8 +479,7 @@ private fun AppItem(
                         .padding(start = 12.dp)
                 ) {
                     AppIcon(
-                        packageName = app.packageName,
-                        userId = app.userId,
+                        app = app,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                 }

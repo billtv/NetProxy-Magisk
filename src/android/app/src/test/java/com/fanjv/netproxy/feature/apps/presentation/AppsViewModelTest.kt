@@ -69,7 +69,7 @@ class AppsViewModelTest {
                 "/android/users" -> """[{"id":0,"name":"Owner"}]"""
                 "/android/apps" -> {
                     val apps = listOf("alpha.example", "beta.example", "system.example").map { name ->
-                        AndroidApp(name, label(name), 10000, name.startsWith("system"), 1, 1)
+                        AndroidApp(name, label(name), 10000, name.startsWith("system"), 1, 1, "")
                     }
                     """{"user_id":0,"revision":"apps","apps":${Json.encodeToString(apps)}}"""
                 }
@@ -558,13 +558,13 @@ class AppsViewModelTest {
         assertEquals(10, lookups.get())
     }
 
-    @Test fun forceRefreshReloadsListingLabelsAndIconGeneration() = runBlocking {
+    @Test fun forceRefreshReloadsListingLabelsWithoutClearingIcons() = runBlocking {
         val label = AtomicReference("Before")
         val vm = model(this, Transport(), packages { label.get() })
         vm.load(); vm.loaded()
         val revision = AppIconCache.revision
         label.set("After"); vm.load(force = true)
         withTimeout(5_000) { vm.state.first { !it.isLoadingApps && it.allApps.all { app -> app.label == "After" } } }
-        assertTrue(AppIconCache.revision > revision)
+        assertEquals(revision, AppIconCache.revision)
     }
 }

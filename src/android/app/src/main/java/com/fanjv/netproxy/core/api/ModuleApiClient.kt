@@ -22,6 +22,7 @@ internal interface ModuleApiTransport {
     suspend fun reconnect(address: String)
     suspend fun request(method: String, path: String, body: JsonObject?, query: Map<String, String>, mutation: Boolean): ModuleHttpResponse
     suspend fun download(path: String, query: Map<String, String>, destination: File)
+    suspend fun image(path: String): ByteArray
     suspend fun watch(topics: Set<String>, consume: suspend (ModuleEvent) -> Unit)
 }
 
@@ -86,6 +87,7 @@ internal class ModuleApiClient(private val transport: ModuleApiTransport) {
     suspend fun delete(path: String, query: Map<String, String> = emptyMap()) = request("DELETE", path, query = query, mutation = true)
     suspend inline fun <reified T> read(path: String, query: Map<String, String> = emptyMap()): T = json.decodeFromJsonElement(get(path, query).data)
     suspend fun download(path: String, query: Map<String, String>, destination: File) = transport.download(path, query, destination)
+    suspend fun image(path: String) = transport.image(path)
 
     private suspend fun request(method: String, path: String, body: JsonObject? = null,
         query: Map<String, String> = emptyMap(), mutation: Boolean = false): ModuleApiResponse {
