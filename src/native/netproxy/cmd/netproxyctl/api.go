@@ -40,7 +40,7 @@ func (c *cli) api(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "access":
-		writeJSON(os.Stdout, contract.Success("api.access", "管理接口连接信息", map[string]string{"address": "http://" + config.Listen, "secret": config.Secret}))
+		writeJSON(os.Stdout, contract.Success("api.access", "管理接口连接信息", config.Connection()))
 	case "status":
 		probeContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()

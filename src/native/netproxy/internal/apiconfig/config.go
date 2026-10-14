@@ -18,8 +18,10 @@ import (
 const DefaultListen = "127.0.0.1:9091"
 
 type Config struct {
-	Listen string `json:"listen"`
-	Secret string `json:"secret"`
+	Listen      string `json:"listen"`
+	Secret      string `json:"secret"`
+	Certificate string `json:"certificate"`
+	PrivateKey  string `json:"private_key"`
 }
 
 func (config Config) Validate() error {
@@ -31,7 +33,7 @@ func (config Config) Validate() error {
 	if err != nil || len(secret) != 32 {
 		return errors.New("API secret 必须为 32 字节随机值的十六进制编码")
 	}
-	return nil
+	return config.validateCertificate(address.Addr().Unmap())
 }
 
 func Load(path string) (Config, error) {
@@ -48,7 +50,7 @@ func Load(path string) (Config, error) {
 	}
 	var config Config
 	if err := json.Unmarshal(content, &config, json.RejectUnknownMembers(true)); err != nil {
-		return Config{}, errors.New("API 配置不是有效的 listen/secret JSON")
+		return Config{}, errors.New("API 配置格式无效")
 	}
 	return config, config.Validate()
 }
@@ -71,6 +73,9 @@ func Initialize(ctx context.Context, path string) (Config, error) {
 		return Config{}, err
 	}
 	config := Config{Listen: DefaultListen, Secret: hex.EncodeToString(random[:])}
+	if err := config.generateCertificate(); err != nil {
+		return Config{}, err
+	}
 	content, err := json.Marshal(config, json.Deterministic(true))
 	if err != nil {
 		return Config{}, err

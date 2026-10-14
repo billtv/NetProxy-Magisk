@@ -14,7 +14,6 @@ navigationevent = "1.2.0"
 composeBom = "2026.09.00"
 
 # Third-party
-libsu = "6.0.0"
 miuix = "0.9.4"
 hiddenapibypass = "6.1"
 junit = "4.13.2"
@@ -37,9 +36,6 @@ androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graph
 
 # KotlinX
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
-
-# Libsu
-libsu-core = { group = "com.github.topjohnwu.libsu", name = "core", version.ref = "libsu" }
 
 # Miuix
 miuix-ui = { module = "top.yukonga.miuix.kmp:miuix-ui-android", version.ref = "miuix" }

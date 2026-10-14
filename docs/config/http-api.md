@@ -6,6 +6,10 @@ sing-box Service API 位于 9090，负责核心运行时；模块 HTTP API 默�
 
 ## 连接
 
+官方 Android 管理器会自动连接，无需申请 Root 或复制凭据。以下命令用于开发者接入和独立 CLI 排查。
+
+如果主动修改了接口地址后又清除管理器数据，点击仪表盘的连接失败卡片，填写实际本机 HTTPS 地址即可重新连接，不需要填写凭据。
+
 在手机终端执行：
 
 ```sh
@@ -13,7 +17,9 @@ su -c '/data/adb/modules/netproxy/netproxyctl api status'
 su -c '/data/adb/modules/netproxy/netproxyctl api access'
 ```
 
-`api access` 的 `data.address` 是地址，`data.secret` 是私有凭据。请求通过 `Authorization: Bearer <secret>` 鉴权，不将凭据放入网址。
+`api access` 的 `data.address` 是 HTTPS 地址，`data.secret` 是私有凭据，`data.certificate_sha256` 是服务证书 SHA-256。客户端必须校验证书指纹，再通过 `Authorization: Bearer <secret>` 鉴权，不将凭据放入网址。
+
+`service` 与 `status` 事件中的 `core_started_at_millis` 是已验证核心身份；未确认时为 `0`。合并实时流量时须与 `traffic.started_at_millis` 一致，不能把旧核心的流量带到新实例。
 
 安装器会初始化 `config/api.json`。手动部署程序后，可执行：
 
@@ -30,14 +36,14 @@ su -c '/data/adb/modules/netproxy/netproxyctl api start'
 adb forward tcp:9091 tcp:9091
 ```
 
-随后请求电脑的 `http://127.0.0.1:9091/api/v1`。这只转发管理接口，不启用电脑本机透明代理。
+随后请求电脑的 `https://127.0.0.1:9091/api/v1`，仍需校验设备服务证书。这只转发管理接口，不启用电脑本机透明代理。
 
 ## 基础请求
 
-下面的 JavaScript 可用于同源客户端或非浏览器客户端，`secret` 来自刚才的 Root 读取。浏览器不允许无关网页跨域控制模块。
+下面展示请求格式，执行环境须事先建立服务证书信任；非浏览器客户端应固定校验已取得的指纹，而不是关闭证书验证。`secret` 来自刚才的 Root 读取。浏览器不允许无关网页跨域控制模块。
 
 ```js
-const base = 'http://127.0.0.1:9091/api/v1'
+const base = 'https://127.0.0.1:9091/api/v1'
 const secret = '<仅在本地使用的凭据>'
 
 async function request(path, method = 'GET', body) {
@@ -87,7 +93,7 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /info` | 模块版本、API 版本和后台实例身份 |
+| `GET /info` | 模块版本、API 版本、后台实例身份与 Go 堆/栈内存字节数 |
 | `GET /service` | 服务状态、实际后端、模式与当前节点 |
 | `POST /service/start`、`stop`、`restart`、`reload`、`check` | 对应服务操作，无正文或传空对象 |
 | `GET /catalog` | 持久分组摘要 |
@@ -102,8 +108,8 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `POST /nodes/delay` | 测速，正文含 `group_id/node_tag`；空 tag 测整个分组 |
 | `GET/PUT /selection` | 查询或保存节点选择 |
 | `GET/PUT /mode` | 查询或保存内核原生模式；正文为 `{"mode":"Rule"}` 等 |
-| `GET/POST /subscriptions` | 订阅列表或添加订阅 |
-| `GET/PUT/DELETE /subscriptions/{id}` | 查询、编辑或删除订阅；`?private=true` 读取私有设置 |
+| `GET/POST /subscriptions` | 本地与订阅分组列表，或添加 URL 订阅 |
+| `GET/PUT/DELETE /subscriptions/{id}` | 查询分组详情，或编辑、删除 URL 订阅；`?private=true` 仅读取 URL 订阅私有设置 |
 | `POST /subscriptions/{id}/update` | 更新一个订阅 |
 | `POST /subscriptions/update-all` | 更新全部订阅 |
 | `GET /subscriptions/{id}/history`、`progress` | 历史与当前进度 |
@@ -113,6 +119,9 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 | `POST /config/validate?target=...` | 仅校验候选，不保存 |
 | `GET /network/wifi-list` | 已保存的 Wi-Fi 名称 |
 | `GET /app-policy` | 当前应用策略；修改使用 `inbound/app` 配置目标 |
+| `GET /android/users` | Android 用户列表 |
+| `GET /android/apps?user_id=...&size=...` | 指定用户的应用、UID、名称与版本；可选 `size=16–192` 同时准备图标并返回 `icon_key` |
+| `GET /android/icons/{icon_key}` | 读取已准备的 PNG 图标；`icon_key` 包含用户、尺寸与资源版本，不再启动平台查询 |
 | `POST /diagnostics/ebpf` | 能力预检，正文含 `mode/raw` |
 | `GET /logs?kind=service&lines=200` | 脱敏日志，类型为 `service/core`，最多 2000 行 |
 | `DELETE /logs?kind=service` | 清空日志 |
@@ -121,14 +130,20 @@ HTTP 保存必须提供读取时的 revision。发生 `config.conflict` 时重�
 
 订阅添加与编辑支持 `name/url/user_agent/hwid/custom_headers/auto_update/update_interval/update_via_proxy/include/exclude/allow_insecure/download_timeout`。`update_interval` 与 `download_timeout` 使用秒；下载方式为 `auto/always/never`，分别对应自动、代理、直连。编辑时省略字段保留原值，清空请求头使用空对象，而不是 null。
 
+`subscriptions` 事件与列表接口返回同一组摘要，包含“本地配置”和活动分组状态；更新订阅操作只处理 URL 订阅。
+
 接口不接受手机的输入或输出文件路径。节点导入传文件内容；诊断导出直接下载，不能指定设备写入位置。
+
+`POST /auth/provision` 是唯一无 Bearer 的引导入口，只允许无 Origin 的空请求或空对象。它不会返回凭据，只会验证用户 0 中官方管理器的签名并向其私有接收组件交付连接资料；其他应用不能借此取得管理权限。
+
+应用名称和图标由模块按需运行的小型 Java 辅助程序调用 Android 框架生成，按 Android 用户分别查询。带 `size` 的清单请求准备可重建的图标缓存；客户端随后使用清单中的 `icon_key` 读取 PNG 二进制，不在滚动时反复启动辅助程序。应用更新、系统语言或资源配置变化会更新图标键。辅助程序不常驻，也不依赖管理器进程。
 
 ## 实时订阅
 
 事件采用 SSE，使用带 Authorization 的 `fetch` 读取 `response.body`，不要为 EventSource 把 secret 加到 URL。
 
 - `status`：模块服务状态。
-- `traffic`：核心实时状态，属于 `status` 主题；`available=false` 表示核心不可用。
+- `traffic`：核心实时状态及 CPU 计数，属于 `status` 主题；`available=false` 表示核心不可用。
 - `groups`：节点快照与实际选择。
 - `subscriptions`：订阅状态与更新进度。
 
