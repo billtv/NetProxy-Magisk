@@ -1,7 +1,9 @@
 package com.fanjv.netproxy.feature.apps.presentation
 
+import com.fanjv.netproxy.core.api.*
+
 import androidx.compose.runtime.saveable.SaverScope
-import com.fanjv.netproxy.core.command.*
+import com.fanjv.netproxy.core.config.*
 import com.fanjv.netproxy.core.ui.component.SearchStatus
 import com.fanjv.netproxy.feature.apps.data.*
 import com.fanjv.netproxy.feature.apps.model.AppProxyConfig
@@ -27,32 +29,30 @@ import org.junit.rules.TemporaryFolder
 class AppsViewModelTest {
     @get:Rule val folder = TemporaryFolder()
 
-    private class Transport : NetProxyCtlTransport {
+    private class Transport : TestApiTransport() {
         @Volatile var config = AppProxyConfig(enabled = true, mode = "whitelist")
         var revision = 0
-        val calls = CopyOnWriteArrayList<List<String>>()
-        var before: suspend (List<String>) -> Unit = {}
-        var after: suspend (List<String>) -> Unit = {}
+        val calls = CopyOnWriteArrayList<ApiTestRequest>()
+        var before: suspend (ApiTestRequest) -> Unit = {}
+        var after: suspend (ApiTestRequest) -> Unit = {}
         private val json = Json { encodeDefaults = true }
-        val writes get() = calls.count { it[1] == "apply" }
+        val writes get() = calls.count { it.method == "PUT" }
 
-        override suspend fun execute(arguments: List<String>, timeoutMillis: Long): NetProxyCtlOutput {
-            calls += arguments
-            before(arguments)
-            val data = if (arguments[1] == "apply") {
-                if (arguments[3] != revision.toString()) throw NetProxyCtlException("config.conflict", "conflict")
+        override suspend fun respond(request: ApiTestRequest): ModuleHttpResponse {
+            calls += request
+            before(request)
+            val data = if (request.method == "PUT") {
+                if (request.text("revision") != revision.toString()) throw ModuleApiException("config.conflict", "conflict")
                 config = Json.decodeFromJsonElement(AppProxyConfig.serializer(),
-                    Json.parseToJsonElement(File(arguments.last()).readText()).jsonObject.getValue("app"))
+                    Json.parseToJsonElement(request.text("content")).jsonObject.getValue("app"))
                 revision++
                 """{"revision":"$revision"}"""
             } else {
                 val content = json.encodeToString(mapOf("app" to config))
                 """{"revision":"$revision","content":${Json.encodeToString(content)}}"""
             }
-            after(arguments)
-            return NetProxyCtlOutput(true, listOf(
-                """{"schema":1,"ok":true,"code":"config.test","message":"","data":$data}"""
-            ), emptyList())
+            after(request)
+            return apiSuccess(data)
         }
     }
 
@@ -64,17 +64,25 @@ class AppsViewModelTest {
     }
 
     private fun packages(label: (String) -> String = { it }) = AppPackageRepository(
-        queryPackages = { args -> when {
-            args.last() == "users" -> listOf("UserInfo{0:Owner:13}")
-            args.last() == "-s" -> listOf("package:system.example")
-            else -> listOf("package:alpha.example", "package:beta.example")
-        } }, resolveLabel = label,
+        ModuleApiClient(TestApiTransport { request ->
+            val data = when (request.path) {
+                "/android/users" -> """[{"id":0,"name":"Owner"}]"""
+                "/android/apps" -> {
+                    val apps = listOf("alpha.example", "beta.example", "system.example").map { name ->
+                        AndroidApp(name, label(name), 10000, name.startsWith("system"), 1, 1, "")
+                    }
+                    """{"user_id":0,"revision":"apps","apps":${Json.encodeToString(apps)}}"""
+                }
+                else -> error("Unexpected request")
+            }
+            apiSuccess(data)
+        })
     )
 
     private fun model(scope: CoroutineScope, transport: Transport, catalog: AppPackageRepository = packages(),
         dispatcher: CoroutineDispatcher = Dispatchers.Default, saveScope: CoroutineScope = scope,
         onSaveFailure: (String) -> Unit = {}) = AppsViewModel(
-        AppPolicyRepository(ConfigRepository(NetProxyCtlClient(transport = transport), CommandFileStore(folder.root))),
+        AppPolicyRepository(ConfigRepository(ModuleApiClient(transport = transport))),
         catalog, scope, dispatcher, ConfigurationWrites(saveScope) { onSaveFailure(it.message.orEmpty()) },
     )
 
@@ -115,7 +123,7 @@ class AppsViewModelTest {
         val transport = Transport()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply") {
+        transport.before = { if (it.method == "PUT") {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         val vm = model(pageScope, transport, saveScope = this)
@@ -140,7 +148,7 @@ class AppsViewModelTest {
         val vm = model(pageScope, transport, saveScope = this, onSaveFailure = errors::add)
         try {
             vm.load(); vm.loaded()
-            transport.before = { if (it[1] == "apply") throw NetProxyCtlException("config.conflict", "conflict") }
+            transport.before = { if (it.method == "PUT") throw ModuleApiException("config.conflict", "conflict") }
             vm.toggle("0:alpha.example")
             vm.requestPolicyFlush(); pageScope.cancel()
             withTimeout(5_000) { vm.state.first { it.requiresPolicyReload && !it.isSavingPolicy } }
@@ -203,7 +211,7 @@ class AppsViewModelTest {
         vm.load(); vm.loaded()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply" && transport.writes == 1) {
+        transport.before = { if (it.method == "PUT" && transport.writes == 1) {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         vm.toggle("0:alpha.example"); vm.requestPolicyFlush()
@@ -226,7 +234,7 @@ class AppsViewModelTest {
         vm.load(); vm.loaded()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply" && transport.writes == 1) {
+        transport.before = { if (it.method == "PUT" && transport.writes == 1) {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         vm.toggle("0:alpha.example")
@@ -252,7 +260,7 @@ class AppsViewModelTest {
         vm.load(); vm.loaded()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply" && transport.writes == 1) {
+        transport.before = { if (it.method == "PUT" && transport.writes == 1) {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         vm.toggle("0:alpha.example"); vm.requestPolicyFlush()
@@ -272,7 +280,7 @@ class AppsViewModelTest {
         vm.load(); vm.loaded()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply" && transport.writes == 1) {
+        transport.before = { if (it.method == "PUT" && transport.writes == 1) {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         vm.toggle("0:alpha.example"); vm.requestPolicyFlush()
@@ -292,7 +300,7 @@ class AppsViewModelTest {
         val vm = model(this, transport)
         vm.load(); vm.loaded()
         vm.setProxySettings(true, "blacklist"); vm.toggle("0:beta.example")
-        transport.before = { if (it[1] == "apply") throw NetProxyCtlException("config.conflict", "conflict") }
+        transport.before = { if (it.method == "PUT") throw ModuleApiException("config.conflict", "conflict") }
         assertFalse(vm.flushPolicy())
         assertEquals("blacklist", vm.state.value.appProxyMode)
         assertEquals(setOf("0:beta.example"), vm.state.value.proxiedApps)
@@ -301,7 +309,7 @@ class AppsViewModelTest {
         withTimeout(5_000) { vm.state.first { !it.isLoadingApps } }
         assertFalse(vm.flushPolicy())
         assertEquals(1, transport.writes)
-        assertEquals(1, transport.calls.count { it[1] == "read" })
+        assertEquals(1, transport.calls.count { it.method == "GET" })
         transport.before = {}
         vm.discardPolicyAndReload()
         vm.loaded()
@@ -315,7 +323,7 @@ class AppsViewModelTest {
         val transport = Transport()
         val vm = model(this, transport)
         vm.load(); vm.loaded()
-        transport.after = { if (it[1] == "apply") throw NetProxyCtlException("subscription.runtime_sync_failed", "failed") }
+        transport.after = { if (it.method == "PUT") throw ModuleApiException("subscription.runtime_sync_failed", "failed") }
         vm.toggle("0:alpha.example")
         assertFalse(vm.flushPolicy())
         assertEquals(listOf("0:alpha.example"), transport.config.proxyApps)
@@ -334,7 +342,7 @@ class AppsViewModelTest {
         vm.load(); vm.loaded()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        transport.before = { if (it[1] == "apply") {
+        transport.before = { if (it.method == "PUT") {
             entered.complete(Unit); withTimeout(5_000) { release.await() }
         } }
         vm.toggle("0:alpha.example")
@@ -524,7 +532,7 @@ class AppsViewModelTest {
         withTimeout(5_000) { vm.state.first { !it.isLoadingApps && it.masterAppList.isNotEmpty() } }
         dispatcher.drain(); yield()
         vm.updateSearch("alpha"); yield()
-        transport.before = { throw NetProxyCtlException("config.read_failed", "failed") }
+        transport.before = { throw ModuleApiException("config.read_failed", "failed") }
         vm.load(force = true)
         withTimeout(5_000) { vm.state.first { !it.isLoadingApps } }
         dispatcher.drain(); yield()
@@ -534,29 +542,29 @@ class AppsViewModelTest {
 
     @Test fun cancellationStopsCpuFilteringBeforeTraversingRemainingApps() = runBlocking {
         val lookups = AtomicInteger()
-        val entries = (0..1_000).map { AppInfoModel("pkg.$it", "App $it") }
         val job = launch {
             val current = currentCoroutineContext().job
-            val labels = object : Map<String, String> by emptyMap() {
-                override fun get(key: String): String? {
+            val entries = object : AbstractList<AppInfoModel>() {
+                override val size = 1_001
+                override fun get(index: Int): AppInfoModel {
                     if (lookups.incrementAndGet() == 10) current.cancel()
-                    return null
+                    return AppInfoModel("pkg.$index", "App $index")
                 }
             }
-            calculateAppsList(AppsUiState(masterAppList = entries), labels)
+            calculateAppsList(AppsUiState(masterAppList = entries))
         }
         job.join()
         assertTrue(job.isCancelled)
         assertEquals(10, lookups.get())
     }
 
-    @Test fun forceRefreshReloadsListingLabelsAndIconGeneration() = runBlocking {
+    @Test fun forceRefreshReloadsListingLabelsWithoutClearingIcons() = runBlocking {
         val label = AtomicReference("Before")
         val vm = model(this, Transport(), packages { label.get() })
         vm.load(); vm.loaded()
         val revision = AppIconCache.revision
         label.set("After"); vm.load(force = true)
         withTimeout(5_000) { vm.state.first { !it.isLoadingApps && it.allApps.all { app -> app.label == "After" } } }
-        assertTrue(AppIconCache.revision > revision)
+        assertEquals(revision, AppIconCache.revision)
     }
 }

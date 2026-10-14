@@ -1,125 +1,68 @@
 package com.fanjv.netproxy.feature.apps.data
 
-import android.content.Context
-import com.fanjv.netproxy.core.command.ShellCommand
+import com.fanjv.netproxy.core.api.ModuleApiClient
 import com.fanjv.netproxy.feature.apps.model.UserInfo
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 
-/** 通过 root shell 查询应用列表，并通过 PackageManager 解析显示名称。 */
-internal class AppPackageRepository(
-    private val queryPackages: suspend (List<String>) -> List<String>?,
-    private val resolveLabel: (String) -> String,
-) {
-    constructor(context: Context) : this(
-        queryPackages = { arguments ->
-            ShellCommand.execute(*arguments.toTypedArray()).let { if (it.isSuccess) it.out else null }
-        },
-        resolveLabel = { packageName ->
-            val manager = context.applicationContext.packageManager
-            manager.getApplicationLabel(manager.getApplicationInfo(packageName, 0)).toString()
-        },
-    )
+@Serializable
+internal data class AndroidApp(
+    @SerialName("package_name") val packageName: String,
+    val label: String,
+    val uid: Int,
+    val system: Boolean,
+    @SerialName("version_code") val versionCode: Long,
+    @SerialName("last_update_time") val lastUpdateTime: Long,
+    @SerialName("icon_key") val iconKey: String,
+)
 
-    private val packageListingCacheMutex = Mutex()
-    private var cacheRevision = 0L
-    private var cachedUsers: List<UserInfo>? = null
-    private val cachedInstalledPackages = HashMap<String, List<String>>()
+@Serializable
+private data class AndroidUser(val id: Int, val name: String)
+@Serializable
+private data class AndroidApps(val user_id: Int, val revision: String, val apps: List<AndroidApp>)
 
-    suspend fun getUsers(): List<UserInfo> = withContext(Dispatchers.IO) {
-        val revision = packageListingCacheMutex.withLock {
-            cachedUsers?.let { return@withContext it }
-            cacheRevision
+internal class AppPackageRepository(private val client: ModuleApiClient) {
+    private val mutex = Mutex()
+    private var users: List<UserInfo>? = null
+    private val applications = HashMap<String, AndroidApps>()
+    private var generation = 0L
+    private val queries = HashMap<String, Mutex>()
+
+    suspend fun getUsers(): List<UserInfo> {
+        val (version, query) = mutex.withLock {
+            users?.let { return it }
+            generation to queries.getOrPut("users") { Mutex() }
         }
-
-        val result = queryPackages(listOf("pm", "list", "users"))
-        if (result.isNullOrEmpty()) {
-            return@withContext listOf(UserInfo("0", "Owner"))
+        return query.withLock {
+            mutex.withLock { if (generation == version) users?.let { return@withLock it } else null }?.let { return@withLock it }
+            val result = client.read<List<AndroidUser>>("/android/users").map { UserInfo(it.id.toString(), it.name) }
+            mutex.withLock { if (generation == version) users = result }
+            result
         }
-
-        val users = ArrayList<UserInfo>()
-        for (line in result) {
-            currentCoroutineContext().ensureActive()
-            val startBracket = line.indexOf('{')
-            val endBracket = line.indexOf('}')
-
-            if (startBracket != -1 && endBracket != -1 && startBracket < endBracket) {
-                val innerContent = line.substring(startBracket + 1, endBracket)
-                val firstColon = innerContent.indexOf(':')
-                val lastColon = innerContent.lastIndexOf(':')
-
-                if (firstColon != -1 && firstColon != lastColon) {
-                    val id = innerContent.substring(0, firstColon)
-                    val name = innerContent.substring(firstColon + 1, lastColon)
-                    users.add(UserInfo(id, name))
-                }
-            }
-        }
-
-        if (users.isEmpty()) {
-            users.add(UserInfo("0", "Owner"))
-        }
-
-        packageListingCacheMutex.withLock {
-            currentCoroutineContext().ensureActive()
-            if (revision == cacheRevision) cachedUsers = users
-        }
-
-        users
     }
 
-    suspend fun getInstalledPackages(userId: String = "0", filter: String = "user"): List<String> =
-        withContext(Dispatchers.IO) {
-            val cacheKey = "$userId|$filter"
-            val revision = packageListingCacheMutex.withLock {
-                cachedInstalledPackages[cacheKey]?.let { return@withContext it }
-                cacheRevision
-            }
-
-            val filterArg = when (filter) {
-                "system" -> "-s"
-                "user" -> "-3"
-                else -> ""
-            }
-            val command =
-                if (filterArg.isEmpty()) {
-                    arrayOf("pm", "list", "packages", "--user", userId)
-                } else {
-                    arrayOf("pm", "list", "packages", "--user", userId, filterArg)
-                }
-            val result = queryPackages(command.toList()) ?: return@withContext emptyList()
-
-            val packages = ArrayList<String>(result.size)
-            for (line in result) {
-                currentCoroutineContext().ensureActive()
-                if (line.startsWith("package:")) {
-                    packages.add(line.substring(8))
-                }
-            }
-
-            packageListingCacheMutex.withLock {
-                currentCoroutineContext().ensureActive()
-                if (revision == cacheRevision) cachedInstalledPackages[cacheKey] = packages
-            }
-
-            packages
+    suspend fun getApplications(user: String = "0", size: Int = 96): List<AndroidApp> {
+        val key = "$user:$size"
+        val (version, query) = mutex.withLock {
+            applications[key]?.let { return it.apps }
+            generation to queries.getOrPut("apps:$key") { Mutex() }
         }
-
-    suspend fun invalidatePackageListingCaches() = packageListingCacheMutex.withLock {
-        cacheRevision++
-        cachedUsers = null
-        cachedInstalledPackages.clear()
+        return query.withLock {
+            mutex.withLock { if (generation == version) applications[key] else null }?.let { return@withLock it.apps }
+            val result = client.read<AndroidApps>("/android/apps", mapOf("user_id" to user, "size" to size.toString()))
+            mutex.withLock { if (generation == version) applications[key] = result }
+            result.apps
+        }
     }
 
-    fun label(packageName: String): String = try {
-        resolveLabel(packageName)
-    } catch (error: Exception) {
-        if (error is CancellationException) throw error
-        packageName
+    suspend fun icon(key: String): ByteArray = client.image("/android/icons/$key")
+
+    suspend fun invalidatePackageListingCaches() = mutex.withLock {
+        users = null
+        applications.clear()
+        queries.clear()
+        generation++
     }
 }

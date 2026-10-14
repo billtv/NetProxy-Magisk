@@ -125,9 +125,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.material.icons.extended)
 
-    // libsu
-    implementation(libs.libsu.core)
-
     // Miuix
     implementation(libs.miuix.ui)
     implementation(libs.miuix.icons)
